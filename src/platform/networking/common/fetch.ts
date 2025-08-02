@@ -3,6 +3,7 @@
  *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
 
+import { ThinkingDelta } from '../../thinking/common/thinking';
 import { Response } from './fetcherService';
 import { ChoiceLogProbs } from './openai';
 
@@ -145,6 +146,7 @@ export interface IResponseDelta {
 	beginToolCalls?: ICopilotBeginToolCall[];
 	_deprecatedCopilotFunctionCalls?: ICopilotFunctionCall[];
 	copilotConfirmation?: ICopilotConfirmation;
+	thinking?: ThinkingDelta;
 }
 
 export interface FinishedCallback {

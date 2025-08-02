@@ -10,9 +10,8 @@ import { BudgetExceededError } from '@vscode/prompt-tsx/dist/base/materialized';
 import type * as vscode from 'vscode';
 import { ChatLocation, ChatResponse } from '../../../platform/chat/common/commonTypes';
 import { ConfigKey, IConfigurationService } from '../../../platform/configuration/common/configurationService';
-import { modelMightUseReplaceStringExclusively, modelSupportsApplyPatch, modelSupportsReplaceString } from '../../../platform/endpoint/common/chatModelCapabilities';
+import { modelCanUseReplaceStringExclusively, modelSupportsApplyPatch, modelSupportsReplaceString } from '../../../platform/endpoint/common/chatModelCapabilities';
 import { IEndpointProvider } from '../../../platform/endpoint/common/endpointProvider';
-import { CacheType } from '../../../platform/endpoint/common/endpointTypes';
 import { IEnvService } from '../../../platform/env/common/envService';
 import { ILogService } from '../../../platform/log/common/logService';
 import { IEditLogService } from '../../../platform/multiFileEdit/common/editLogService';
@@ -44,6 +43,9 @@ import { EditCodePrompt2 } from '../../prompts/node/panel/editCodePrompt2';
 import { ToolResultMetadata } from '../../prompts/node/panel/toolCalling';
 import { ToolName } from '../../tools/common/toolNames';
 import { IToolsService } from '../../tools/common/toolsService';
+import { VirtualTool } from '../../tools/common/virtualTools/virtualTool';
+import { IToolGroupingService } from '../../tools/common/virtualTools/virtualToolTypes';
+import { addCacheBreakpoints } from './cacheBreakpoints';
 import { EditCodeIntent, EditCodeIntentInvocation, EditCodeIntentInvocationOptions, mergeMetadata, toNewChatReferences } from './editCodeIntent';
 import { getRequestedToolCallIterationLimit, IContinueOnErrorConfirmation } from './toolCallingLoop';
 
@@ -57,22 +59,18 @@ const getTools = (instaService: IInstantiationService, request: vscode.ChatReque
 		const endpointProvider = accessor.get<IEndpointProvider>(IEndpointProvider);
 		const model = await endpointProvider.getChatEndpoint(request);
 
-		// Claude: replace_string AND insert_edits
-		// 4.1/o4-mini: apply_patch AND insert_edits
 		const allowTools: Record<string, boolean> = {};
-		const applyPatchConfigEnabled = configurationService.getExperimentBasedConfig<boolean>(ConfigKey.Internal.EnableApplyPatchTool, experimentationService); // (can't use extension exp config in package.json "when" clause)
-		const useApplyPatch = !!(modelSupportsApplyPatch(model) && applyPatchConfigEnabled && toolsService.getTool(ToolName.ApplyPatch));
 		allowTools[ToolName.EditFile] = true;
-		allowTools[ToolName.ReplaceString] = modelSupportsReplaceString(model) || !!(model.family.includes('gemini') && experimentationService.getTreatmentVariable<boolean>('vscode', 'copilotchat.geminiReplaceString'));
-		allowTools[ToolName.ApplyPatch] = useApplyPatch;
+		allowTools[ToolName.ReplaceString] = modelSupportsReplaceString(model) || !!(model.family.includes('gemini') && configurationService.getExperimentBasedConfig(ConfigKey.Internal.GeminiReplaceString, experimentationService));
+		allowTools[ToolName.ApplyPatch] = await modelSupportsApplyPatch(model) && !!toolsService.getTool(ToolName.ApplyPatch);
 
-		if (modelMightUseReplaceStringExclusively(model) && experimentationService.getTreatmentVariable<boolean>('vscode', 'copilotchat.claudeReplaceStringExclusively')) {
+		if (modelCanUseReplaceStringExclusively(model)) {
 			allowTools[ToolName.ReplaceString] = true;
 			allowTools[ToolName.EditFile] = false;
 		}
 
 		allowTools[ToolName.RunTests] = await testService.hasAnyTests();
-		allowTools[ToolName.RunTask] = !!(configurationService.getConfig(ConfigKey.AgentCanRunTasks) && tasksService.getTasks().length);
+		allowTools[ToolName.CoreRunTask] = !!(configurationService.getConfig(ConfigKey.AgentCanRunTasks) && tasksService.getTasks().length);
 
 		return toolsService.getEnabledTools(request, tool => {
 			if (typeof allowTools[tool.name] === 'boolean') {
@@ -97,18 +95,52 @@ export class AgentIntent extends EditCodeIntent {
 		@IExperimentationService expService: IExperimentationService,
 		@ICodeMapperService codeMapperService: ICodeMapperService,
 		@IWorkspaceService workspaceService: IWorkspaceService,
+		@IToolGroupingService private readonly _toolGroupingService: IToolGroupingService,
 	) {
 		super(instantiationService, endpointProvider, configurationService, expService, codeMapperService, workspaceService, { intentInvocation: AgentIntentInvocation, processCodeblocks: false });
 	}
 
 	override async handleRequest(conversation: Conversation, request: vscode.ChatRequest, stream: vscode.ChatResponseStream, token: CancellationToken, documentContext: IDocumentContext | undefined, agentName: string, location: ChatLocation, chatTelemetry: ChatTelemetryBuilder, onPaused: Event<boolean>): Promise<vscode.ChatResult> {
 		if (request.command === 'list') {
-			const editingTools = await getTools(this.instantiationService, request);
-			stream.markdown(`Available tools: \n${editingTools.map(tool => `- ${tool.name}`).join('\n')}\n`);
+			await this.listTools(request, stream, token);
 			return {};
 		}
 
 		return super.handleRequest(conversation, request, stream, token, documentContext, agentName, location, chatTelemetry, onPaused);
+	}
+
+	private async listTools(request: vscode.ChatRequest, stream: vscode.ChatResponseStream, token: CancellationToken) {
+		const editingTools = await getTools(this.instantiationService, request);
+		const grouping = this._toolGroupingService.create(editingTools);
+		if (!grouping.isEnabled) {
+			stream.markdown(`Available tools: \n${editingTools.map(tool => `- ${tool.name}`).join('\n')}\n`);
+			return;
+		}
+
+		let str = 'Available tools:\n';
+		function printTool(tool: vscode.LanguageModelToolInformation | VirtualTool, indent = 0) {
+			const prefix = '  '.repeat(indent * 2);
+			str += `${prefix}- ${tool.name}`;
+			if (tool instanceof VirtualTool) {
+				if (tool.isExpanded) {
+					str += ` (expanded):`;
+				} else {
+					str += ': ' + tool.description.split('\n\n').map((chunk, i) => i > 0 ? prefix + '  ' + chunk : chunk).join('\n\n');
+				}
+			}
+			str += '\n';
+			if (tool instanceof VirtualTool && tool.contents.length > 0) {
+				for (const child of tool.contents) {
+					printTool(child, indent + 1);
+				}
+			}
+		}
+
+		const tools = await grouping.computeAll(token);
+		tools.forEach(t => printTool(t));
+		stream.markdown(str);
+
+		return {};
 	}
 
 	protected override getIntentHandlerOptions(request: vscode.ChatRequest): IDefaultIntentRequestHandlerOptions | undefined {
@@ -191,7 +223,7 @@ export class AgentIntentInvocation extends EditCodeIntentInvocation {
 		const safeBudget = Math.floor((baseBudget - toolTokens) * 0.85);
 		const endpoint = toolTokens > 0 ? this.endpoint.cloneWithTokenOverride(safeBudget) : this.endpoint;
 		const summarizationEnabled = this.configurationService.getExperimentBasedConfig(ConfigKey.SummarizeAgentConversationHistory, this.experimentationService) && this.prompt === AgentPrompt;
-		this.logService.logger.debug(`AgentIntent: rendering with budget=${safeBudget} (baseBudget: ${baseBudget}, toolTokens: ${toolTokens}), summarizationEnabled=${summarizationEnabled}`);
+		this.logService.debug(`AgentIntent: rendering with budget=${safeBudget} (baseBudget: ${baseBudget}, toolTokens: ${toolTokens}), summarizationEnabled=${summarizationEnabled}`);
 		let result: RenderPromptResult;
 		const props: AgentPromptProps = {
 			endpoint,
@@ -211,7 +243,7 @@ export class AgentIntentInvocation extends EditCodeIntentInvocation {
 			result = await renderer.render(progress, token);
 		} catch (e) {
 			if (e instanceof BudgetExceededError && summarizationEnabled) {
-				this.logService.logger.debug(`[Agent] budget exceeded, triggering summarization (${e.message})`);
+				this.logService.debug(`[Agent] budget exceeded, triggering summarization (${e.message})`);
 				if (!promptContext.toolCallResults) {
 					promptContext = {
 						...promptContext,
@@ -228,7 +260,7 @@ export class AgentIntentInvocation extends EditCodeIntentInvocation {
 					});
 					result = await renderer.render(progress, token);
 				} catch (e) {
-					this.logService.logger.error(e, `[Agent] summarization failed`);
+					this.logService.error(e, `[Agent] summarization failed`);
 					const errorKind = e instanceof BudgetExceededError ? 'budgetExceeded' : 'error';
 					/* __GDPR__
 						"triggerSummarizeFailed" : {
@@ -287,92 +319,13 @@ export class AgentIntentInvocation extends EditCodeIntentInvocation {
 	}
 
 	modifyErrorDetails(errorDetails: vscode.ChatErrorDetails, response: ChatResponse): vscode.ChatErrorDetails {
-		errorDetails.confirmationButtons = [
-			{ data: { copilotContinueOnError: true } satisfies IContinueOnErrorConfirmation, label: l10n.t('Try Again') },
-		];
+		if (!errorDetails.responseIsFiltered) {
+			errorDetails.confirmationButtons = [
+				{ data: { copilotContinueOnError: true } satisfies IContinueOnErrorConfirmation, label: l10n.t('Try Again') },
+			];
+		}
 		return errorDetails;
 	}
 
 	override processResponse = undefined;
-}
-
-const MaxCacheBreakpoints = 4;
-
-/**
- * Prompt cache breakpoint strategy:
- *
- * The prompt is structured like
- * - System message
- * - Custom instructions
- * - Global context message (has prompt-tsx cache breakpoint)
- * - History
- * - Current user message with extra context
- * - Current tool call rounds
- *
- * Below the current user message, we add cache breakpoints to the last tool result in each round.
- * We add one to the current user message.
- * And above the current user message, we add breakpoionts to an assistant message with no tool calls (so the terminal response in a turn).
- *
- * There will always be a cache miss when a new turn starts because the previous messages move from below the current user message with extra context to above it.
- * For turns with no tool calling, we will have a hit on the previous assistant message in history.
- * During the agentic loop, each request will have a hit on the previous tool result message.
- */
-export function addCacheBreakpoints(messages: Raw.ChatMessage[]) {
-	// One or two cache breakpoints are already added via the prompt, assign the rest here.
-	let count = MaxCacheBreakpoints - countCacheBreakpoints(messages);
-	let isBelowCurrentUserMessage = true;
-	const reversedMsgs = [...messages].reverse();
-	for (const [idx, msg] of reversedMsgs.entries()) {
-		const prevMsg = reversedMsgs.at(idx - 1);
-		const hasCacheBreakpoint = msg.content.some(part => part.type === Raw.ChatCompletionContentPartKind.CacheBreakpoint);
-		if (hasCacheBreakpoint) {
-			continue;
-		}
-
-		const isLastToolResultInRound = msg.role === Raw.ChatRole.Tool && prevMsg?.role !== Raw.ChatRole.Tool;
-		const isAsstMsgWithNoTools = msg.role === Raw.ChatRole.Assistant && !msg.toolCalls?.length;
-		if (isBelowCurrentUserMessage && (isLastToolResultInRound || msg.role === Raw.ChatRole.User) || isAsstMsgWithNoTools) {
-			count--;
-			msg.content.push({
-				type: Raw.ChatCompletionContentPartKind.CacheBreakpoint,
-				cacheType: CacheType
-			});
-
-			if (count <= 0) {
-				break;
-			}
-		}
-
-		if (msg.role === Raw.ChatRole.User) {
-			isBelowCurrentUserMessage = false;
-		}
-	}
-
-	// If we still have cache breakpoints to allocate, add them from the system and custom instructions messages, if applicable.
-	for (const msg of messages) {
-		if (count <= 0) {
-			break;
-		}
-
-		const hasCacheBreakpoint = msg.content.some(part => part.type === Raw.ChatCompletionContentPartKind.CacheBreakpoint);
-		if ((msg.role === Raw.ChatRole.User || msg.role === Raw.ChatRole.System) && !hasCacheBreakpoint) {
-			count--;
-			msg.content.push({
-				type: Raw.ChatCompletionContentPartKind.CacheBreakpoint,
-				cacheType: CacheType
-			});
-		}
-
-		if (msg.role !== Raw.ChatRole.User && msg.role !== Raw.ChatRole.System) {
-			break;
-		}
-	}
-}
-
-function countCacheBreakpoints(messages: Raw.ChatMessage[]) {
-	let count = 0;
-	for (const msg of messages) {
-		count += msg.content.filter(part => part.type === Raw.ChatCompletionContentPartKind.CacheBreakpoint).length;
-	}
-	return count;
 }

@@ -74,7 +74,7 @@ export function registerInlineChatCommands(accessor: ServicesAccessor): IDisposa
 			if (emptySelection) {
 				const severeDiagnostics = vscode.languages.getDiagnostics(emptySelection.activeDocument.uri);
 				const diagnosticsInSelection = severeDiagnostics.filter(d => !!d.range.intersection(emptySelection.range));
-				const filteredDiagnostics = QuickFixesProvider.getSevereDiagnostics(diagnosticsInSelection);
+				const filteredDiagnostics = QuickFixesProvider.getWarningOrErrorDiagnostics(diagnosticsInSelection);
 				if (filteredDiagnostics.length) {
 					message += QuickFixesProvider.getDiagnosticsAsText(severeDiagnostics);
 					explainingDiagnostics = true;
@@ -314,7 +314,7 @@ ${message}`,
 	disposables.add(vscode.commands.registerCommand('github.copilot.chat.review.stagedChanges', () => doReview(...instaService.invokeFunction(getServicesForReview), 'index', vscode.ProgressLocation.SourceControl)));
 	disposables.add(vscode.commands.registerCommand('github.copilot.chat.review.unstagedChanges', () => doReview(...instaService.invokeFunction(getServicesForReview), 'workingTree', vscode.ProgressLocation.SourceControl)));
 	disposables.add(vscode.commands.registerCommand('github.copilot.chat.review.changes', () => doReview(...instaService.invokeFunction(getServicesForReview), 'all', vscode.ProgressLocation.SourceControl)));
-	disposables.add(vscode.commands.registerCommand('github.copilot.chat.review.changes.cancel', () => cancelReview(vscode.ProgressLocation.SourceControl, accessor.get(IRunCommandExecutionService))));
+	disposables.add(vscode.commands.registerCommand('github.copilot.chat.review.changes.cancel', () => cancelReview(vscode.ProgressLocation.SourceControl, instaService.invokeFunction(accessor => accessor.get(IRunCommandExecutionService)))));
 	disposables.add(vscode.commands.registerCommand('github.copilot.chat.review.apply', doApplyReview));
 	disposables.add(vscode.commands.registerCommand('github.copilot.chat.review.applyAndNext', (commentThread: vscode.CommentThread) => doApplyReview(commentThread, true)));
 	disposables.add(vscode.commands.registerCommand('github.copilot.chat.review.applyShort', (commentThread: vscode.CommentThread) => doApplyReview(commentThread, true)));
@@ -412,7 +412,7 @@ function fetchSuggestion(accessor: ServicesAccessor, thread: vscode.CommentThrea
 		return suggestion;
 	})()
 		.catch(err => {
-			logService.logger.error(err, 'Error fetching suggestion');
+			logService.error(err, 'Error fetching suggestion');
 			comment.suggestion = {
 				markdown: `Error fetching suggestion: ${err?.message}`,
 				edits: [],

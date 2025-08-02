@@ -242,7 +242,8 @@ function getWordDefinitionFor(languageId: string): RegExp | undefined {
 export class ExtHostDocumentData extends MirrorTextModel {
 	public static create(uri: Uri, contents: string, languageId: string): ExtHostDocumentData {
 		const lines = splitLines(contents);
-		return new ExtHostDocumentData(uri, lines, '\n', 1, languageId, false);
+		const eol = contents.indexOf('\r\n') !== -1 ? '\r\n' : '\n';
+		return new ExtHostDocumentData(uri, lines, eol, 1, languageId, false);
 	}
 
 	private _document?: TextDocument;
@@ -273,7 +274,6 @@ export class ExtHostDocumentData extends MirrorTextModel {
 
 	get document(): vscode.TextDocument {
 		if (!this._document) {
-			// eslint-disable-next-line @typescript-eslint/no-this-alias
 			const that = this;
 			this._document = {
 				get uri() {

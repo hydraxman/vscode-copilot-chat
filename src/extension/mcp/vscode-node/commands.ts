@@ -19,7 +19,7 @@ import { Conversation, Turn } from '../../prompt/common/conversation';
 import { McpToolCallingLoop } from './mcpToolCallingLoop';
 import { McpPickRef } from './mcpToolCallingTools';
 
-type PackageType = 'npm' | 'pip' | 'docker';
+type PackageType = 'npm' | 'pip' | 'docker' | 'nuget';
 
 interface IValidatePackageArgs {
 	type: PackageType;
@@ -35,7 +35,9 @@ interface PromptStringInputInfo {
 	password?: boolean;
 }
 
-type ValidatePackageResult = { state: 'ok'; publisher: string; version?: string } | { state: 'error'; error: string };
+type ValidatePackageResult =
+	{ state: 'ok'; publisher: string; name?: string; version?: string }
+	| { state: 'error'; error: string };
 
 interface NpmPackageResponse {
 	maintainers?: Array<{ name: string }>;
@@ -48,8 +50,17 @@ interface PyPiPackageResponse {
 		author?: string;
 		author_email?: string;
 		description?: string;
+		name?: string;
 		version?: string;
 	};
+}
+
+interface NuGetServiceIndexResponse {
+	resources?: Array<{ "@id": string; "@type": string }>;
+}
+
+interface NuGetSearchResponse {
+	data?: Array<{ id: string; version: string; description?: string; owners?: Array<string> }>;
 }
 
 interface DockerHubResponse {
@@ -75,7 +86,8 @@ export class McpSetupCommands extends Disposable {
 		super();
 		this._register(toDisposable(() => this.pendingSetup?.cts.dispose(true)));
 		this._register(vscode.commands.registerCommand('github.copilot.chat.mcp.setup.flow', (args: { name: string }) => {
-			if (this.pendingSetup?.name !== args.name) {
+			// allow case-insensitive comparison
+			if (this.pendingSetup?.name.toUpperCase() !== args.name.toUpperCase()) {
 				return undefined;
 			}
 
@@ -99,7 +111,7 @@ export class McpSetupCommands extends Disposable {
 		const done = (async () => {
 			const fakePrompt = `Generate an MCP configuration for ${packageName}`;
 			const mcpLoop = this.instantiationService.createInstance(McpToolCallingLoop, {
-				toolCallLimit: 5,
+				toolCallLimit: 100, // limited via `getAvailableTools` in the loop
 				conversation: new Conversation(generateUuid(), [new Turn(undefined, { type: 'user', message: fakePrompt })]),
 				request: {
 					attempt: 0,
@@ -191,9 +203,65 @@ export class McpSetupCommands extends Disposable {
 					return { state: 'error', error: `Package ${args.name} not found in PyPI registry` };
 				}
 				const data = await response.json() as PyPiPackageResponse;
+				const publisher = data.info?.author || data.info?.author_email || 'unknown';
+				const name = data.info?.name || args.name;
 				const version = data.info?.version;
-				this.enqueuePendingSetup(args.targetConfig, args.name, args.type, data.info?.description, version);
-				return { state: 'ok', publisher: data.info?.author || data.info?.author_email || 'unknown', version };
+				this.enqueuePendingSetup(args.targetConfig, name, args.type, data.info?.description, version);
+				return { state: 'ok', publisher, name, version };
+			} else if (args.type === 'nuget') {
+				// read the service index to find the search URL
+				// https://learn.microsoft.com/en-us/nuget/api/service-index
+				const serviceIndexUrl = `https://api.nuget.org/v3/index.json`;
+				const serviceIndexResponse = await fetch(serviceIndexUrl);
+				if (!serviceIndexResponse.ok) {
+					return { state: 'error', error: `Unable to load the NuGet.org registry service index (${serviceIndexUrl})` };
+				}
+
+				// find the search query URL
+				// https://learn.microsoft.com/en-us/nuget/api/search-query-service-resource
+				const serviceIndex = await serviceIndexResponse.json() as NuGetServiceIndexResponse;
+				const searchBaseUrl = serviceIndex.resources?.find(resource => resource['@type'] === 'SearchQueryService/3.5.0')?.['@id'];
+				if (!searchBaseUrl) {
+					return { state: 'error', error: `Package search URL not found in the NuGet.org registry service index` };
+				}
+
+				// search for the package by ID
+				// https://learn.microsoft.com/en-us/nuget/consume-packages/finding-and-choosing-packages#search-syntax
+				const searchQueryUrl = `${searchBaseUrl}?q=packageid:${encodeURIComponent(args.name)}&prerelease=true&semVerLevel=2.0.0`;
+				const searchResponse = await fetch(searchQueryUrl);
+				if (!searchResponse.ok) {
+					return { state: 'error', error: `Failed to search for ${args.name} in then NuGet.org registry` };
+				}
+				const data = await searchResponse.json() as NuGetSearchResponse;
+				if (!data.data?.[0]) {
+					return { state: 'error', error: `Package ${args.name} not found on NuGet.org` };
+				}
+
+				const id = data.data[0].id ?? args.name;
+				let version = data.data[0].version;
+				if (version.indexOf('+') !== -1) {
+					// NuGet versions can have a + sign for build metadata, we strip it for MCP config and API calls
+					// e.g. 1.0.0+build123 -> 1.0.0
+					version = version.split('+')[0];
+				}
+				const publisher = data.data[0].owners ? data.data[0].owners.join(', ') : 'unknown';
+
+				// Try to fetch the package readme
+				// https://learn.microsoft.com/en-us/nuget/api/readme-template-resource
+				const readmeTemplate = serviceIndex.resources?.find(resource => resource['@type'] === 'ReadmeUriTemplate/6.13.0')?.['@id'];
+				let description = data.data[0].description || undefined;
+				if (readmeTemplate) {
+					const readmeUrl = readmeTemplate
+						.replace('{lower_id}', encodeURIComponent(id.toLowerCase()))
+						.replace('{lower_version}', encodeURIComponent(version.toLowerCase()));
+					const readmeResponse = await fetch(readmeUrl);
+					if (readmeResponse.ok) {
+						description = await readmeResponse.text();
+					}
+				}
+
+				this.enqueuePendingSetup(args.targetConfig, id, args.type, description, version);
+				return { state: 'ok', publisher, name: id, version };
 			} else if (args.type === 'docker') {
 				// Docker Hub API uses namespace/repository format
 				// Handle both formats: 'namespace/repository' or just 'repository' (assumes 'library/' namespace)

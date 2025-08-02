@@ -71,6 +71,7 @@ export namespace ChatLocation {
 	export function toStringShorter(chatLocation: ChatLocation): string {
 		switch (chatLocation) {
 			case ChatLocation.Editor:
+			case ChatLocation.Notebook:
 				return 'inline';
 			case ChatLocation.Panel:
 				return 'panel';
@@ -86,6 +87,7 @@ export enum ChatFetchResponseType {
 	OffTopic = 'offTopic',
 	Canceled = 'canceled',
 	Filtered = 'filtered',
+	PromptFiltered = 'promptFiltered',
 	Length = 'length',
 	RateLimited = 'rateLimited',
 	QuotaExceeded = 'quotaExceeded',
@@ -122,6 +124,10 @@ export type ChatFetchError =
 	 * We requested conversation, but the response was filtered by RAI.
 	 */
 	| { type: ChatFetchResponseType.Filtered; reason: string; category: FilterReason; requestId: string; serverRequestId: string | undefined }
+	/**
+	 * We requested conversation, but the prompt was filtered by RAI.
+	 */
+	| { type: ChatFetchResponseType.PromptFiltered; reason: string; category: FilterReason; requestId: string; serverRequestId: string | undefined }
 	/**
 	 * We requested conversation, but the response was too long.
 	 */
@@ -256,6 +262,7 @@ export function getErrorDetailsFromChatFetchError(fetchResult: ChatFetchError, c
 		case ChatFetchResponseType.Failed:
 			return { message: l10n.t(`Sorry, your request failed. Please try again. Request id: {0}\n\nReason: {1}`, fetchResult.requestId, fetchResult.reason) };
 		case ChatFetchResponseType.Filtered:
+		case ChatFetchResponseType.PromptFiltered:
 			return {
 				message: getFilteredMessage(fetchResult.category),
 				responseIsFiltered: true,
@@ -287,6 +294,16 @@ export function getFilteredMessage(category: FilterReason, supportsMarkdown: boo
 				});
 			} else {
 				return l10n.t(`Sorry, the response matched public code so it was blocked. Please rephrase your prompt.`);
+			}
+		case FilterReason.Prompt:
+			if (supportsMarkdown) {
+				return l10n.t({
+					message:
+						`Sorry, your prompt was filtered by the Responsible AI Service. Please rephrase your prompt and try again. [Learn more](https://aka.ms/copilot-chat-filtered-docs).`,
+					comment: ["{Locked='](https://aka.ms/copilot-chat-filtered-docs)'}"]
+				});
+			} else {
+				return l10n.t(`Sorry, your prompt was filtered by the Responsible AI Service. Please rephrase your prompt and try again.`);
 			}
 		default:
 			if (supportsMarkdown) {
