@@ -3576,7 +3576,10 @@
 		"setup:dotnet:win32": "Invoke-WebRequest -Uri https://raw.githubusercontent.com/dotnet/install-scripts/main/src/dotnet-install.ps1 && chmod u+x dotnet-install.ps1 && ./dotnet-install.ps1 --version latest --quality GA --channel STS && rm dotnet-install.ps1",
 		"create_venv": "tsx script/setup/createVenv.mts",
 		"package": "vsce package",
-		"web": "vscode-test-web --headless --extensionDevelopmentPath=. ."
+		"web": "vscode-test-web --headless --extensionDevelopmentPath=. .",
+		"build:browser": "tsx browser.esbuild.ts",
+		"build:browser:watch": "tsx browser.esbuild.ts --watch --dev",
+		"serve:browser": "npx http-server dist/browser -p 8080"
 	},
 	"devDependencies": {
 		"@azure/identity": "4.9.1",
