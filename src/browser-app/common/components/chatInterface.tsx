@@ -8,7 +8,7 @@ import { chatEngine, ChatMessage } from '../core/chatEngine';
 import { CodeContext, contextProcessor, WorkspaceContext } from '../core/contextProcessor';
 
 export interface ChatInterfaceProps {
-	selectedFile: string | null;
+	selectedFile?: string | null;
 	codeContext?: CodeContext;
 	workspaceContext?: WorkspaceContext;
 }
