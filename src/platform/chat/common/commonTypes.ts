@@ -87,6 +87,7 @@ export enum ChatFetchResponseType {
 	OffTopic = 'offTopic',
 	Canceled = 'canceled',
 	Filtered = 'filtered',
+	FilteredRetry = 'filteredRetry',
 	PromptFiltered = 'promptFiltered',
 	Length = 'length',
 	RateLimited = 'rateLimited',
@@ -98,6 +99,7 @@ export enum ChatFetchResponseType {
 	Unknown = 'unknown',
 	AgentUnauthorized = 'agent_unauthorized',
 	AgentFailedDependency = 'agent_failed_dependency',
+	InvalidStatefulMarker = 'invalid_stateful_marker',
 	Success = 'success'
 }
 
@@ -158,7 +160,18 @@ export type ChatFetchError =
 	 * We requested conversation, but didn't come up with any results for some "unknown"
 	 * reason, such as slur redaction or snippy.
 	 */
-	| { type: ChatFetchResponseType.Unknown; reason: string; requestId: string; serverRequestId: string | undefined };
+	| { type: ChatFetchResponseType.Unknown; reason: string; requestId: string; serverRequestId: string | undefined }
+	/**
+	 * The `statefulMarker` present in the request was invalid or expired. The
+	 * request may be retried without that marker to resubmit it anew.
+	 */
+	| { type: ChatFetchResponseType.InvalidStatefulMarker; reason: string; requestId: string; serverRequestId: string | undefined };
+
+export type ChatFetchRetriableError<T> =
+	/**
+	 * We requested conversation, the response was filtered by RAI, but we want to retry.
+	 */
+	{ type: ChatFetchResponseType.FilteredRetry; reason: string; category: FilterReason; value: T; requestId: string; serverRequestId: string | undefined }
 
 export type FetchSuccess<T> =
 	{ type: ChatFetchResponseType.Success; value: T; requestId: string; serverRequestId: string | undefined; usage: APIUsage | undefined };
@@ -280,6 +293,9 @@ export function getErrorDetailsFromChatFetchError(fetchResult: ChatFetchError, c
 			return { message: l10n.t(`Sorry, no response was returned.`) };
 		case ChatFetchResponseType.ExtensionBlocked:
 			return { message: l10n.t(`Sorry, something went wrong.`) };
+		case ChatFetchResponseType.InvalidStatefulMarker:
+			// should be unreachable, retried within the endpoint
+			return { message: l10n.t(`Your chat session state is invalid, please start a new chat.`) };
 	}
 }
 
