@@ -217,7 +217,7 @@ What would you like to work on today?`
 	return (
 		<div className="chat-interface">
 			<div className="chat-header">
-				<h3>💬 GitHub Copilot Chat</h3>
+				<h3>💬 Composer</h3>
 				<div className="chat-controls">
 					<select
 						value={selectedEndpoint}

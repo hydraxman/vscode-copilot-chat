@@ -21,7 +21,7 @@ export const ChatApp: React.FC<ChatAppProps> = () => {
 			{/* Header */}
 			<div className="app-header">
 				<div className="header-left">
-					<h1 className="app-title">GitHub Copilot Chat</h1>
+					<h1 className="app-title">Composer</h1>
 				</div>
 				<div className="header-right">
 					<button

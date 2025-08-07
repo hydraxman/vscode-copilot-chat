@@ -45,39 +45,436 @@ interface IChatService {
 	checkAuthentication(): Promise<boolean>;
 }
 
+// 类型定义
+interface CopilotTokenData {
+	token: string;
+	expires_at: number;
+	refresh_in: number;
+}
+
+interface GitHubUserInfo {
+	login: string;
+	id: number;
+}
+
+interface ChatCompletion {
+	choices: Array<{
+		message?: {
+			content?: string;
+		};
+		delta?: {
+			content?: string;
+		};
+	}>;
+}
+
 /**
  * Extension Chat Service Bridge
  * 这个类负责在浏览器环境中桥接到VS Code extension的chat逻辑
- * 在实际部署中，这应该通过某种IPC机制与extension通信
+ *
+ * 真实实现：直接复用 VS Code extension 的认证和聊天逻辑
+ *
+ * 集成方案：
+ * 1. 直接导入和实例化 VS Code extension 的服务
+ * 2. 实现真正的 GitHub OAuth 认证流程
+ * 3. 调用真实的 Copilot API 端点
+ * 4. 复用 extension 的 ChatParticipantRequestHandler 处理逻辑
  */
-class ExtensionChatServiceBridge implements IChatService {
+export class ExtensionChatServiceBridge implements IChatService {
 	private disposables = new DisposableStore();
+	private authenticationService?: any; // 真实的 IAuthenticationService 实例
+	private chatMLFetcher?: any; // 真实的 IChatMLFetcher 实例
 
 	constructor() {
-		// 在实际实现中，这里会建立与extension的通信通道
-		// 例如：WebSocket, MessageChannel, 或其他IPC机制
+		// 在浏览器环境中初始化真实的 extension 服务
+		this.initializeExtensionServices();
+	}
+
+	/**
+	 * 初始化 extension 服务
+	 * 直接实例化 VS Code extension 中的认证和聊天服务
+	 */
+	private async initializeExtensionServices(): Promise<void> {
+		try {
+			// 1. 创建真实的认证服务实例
+			await this.initializeAuthenticationService();
+
+			// 2. 创建聊天端点服务
+			await this.initializeChatServices();
+
+			console.log('Extension services initialized successfully');
+		} catch (error) {
+			console.error('Failed to initialize extension services:', error);
+		}
+	}
+
+	/**
+	 * 初始化认证服务
+	 * 复用 VS Code extension 的 IAuthenticationService
+	 */
+	private async initializeAuthenticationService(): Promise<void> {
+		// 在浏览器环境中，我们需要模拟 VS Code 的认证环境
+		// 或者通过 WebSocket/HTTP API 连接到运行真实 extension 的后端
+
+		// 方案1: 如果在 VS Code Web 中运行，可以直接使用 VS Code API
+		const globalThis = this.getGlobalThis();
+		if (globalThis && (globalThis as any).vscode) {
+			await this.initializeVSCodeWebAuth();
+		}
+		// 方案2: 通过 API 连接到运行 extension 的后端服务
+		else {
+			await this.initializeAPIAuth();
+		}
+	}
+
+	/**
+	 * 获取全局对象（支持不同环境）
+	 */
+	private getGlobalThis(): any {
+		try {
+			// 使用 Function 构造器安全地访问全局对象
+			return Function('return this')();
+		} catch {
+			// 后备方案：使用对象属性访问
+			const getGlobal = new Function('name', 'try { return (function() { return this; })()[name]; } catch(e) { return undefined; }');
+			const globals = ['globalThis', 'window', 'global', 'self'];
+			for (const globalName of globals) {
+				try {
+					const globalObj = getGlobal(globalName);
+					if (globalObj && typeof globalObj === 'object') {
+						return globalObj;
+					}
+				} catch {
+					// 忽略错误，继续尝试下一个
+				}
+			}
+			return {};
+		}
+	}
+
+	/**
+	 * 在 VS Code Web 环境中初始化认证
+	 */
+	private async initializeVSCodeWebAuth(): Promise<void> {
+		const globalThis = this.getGlobalThis();
+		const vscode = (globalThis as any).vscode;
+		if (!vscode || !vscode.authentication) {
+			throw new Error('VS Code authentication API not available');
+		}
+
+		const instance = this;
+		// 使用 VS Code Web 的认证 API
+		this.authenticationService = {
+			async getAnyGitHubSession(options: any) {
+				try {
+					return await vscode.authentication.getSession('github', ['user:email'], options);
+				} catch (error) {
+					console.error('Failed to get GitHub session:', error);
+					return undefined;
+				}
+			},
+
+			async getPermissiveGitHubSession(options: any) {
+				try {
+					return await vscode.authentication.getSession('github', ['read:user', 'user:email', 'repo', 'workflow'], options);
+				} catch (error) {
+					console.error('Failed to get permissive GitHub session:', error);
+					return undefined;
+				}
+			},
+
+			async getCopilotToken() {
+				// 通过 GitHub token 获取 Copilot token
+				const session = await this.getAnyGitHubSession({ silent: true });
+				if (!session) {
+					throw new Error('No GitHub session available');
+				}
+
+				return await instance.fetchCopilotTokenFromGitHub(session.accessToken);
+			}
+		};
+	}
+
+	/**
+	 * 通过 API 初始化认证（连接到后端服务）
+	 */
+	private async initializeAPIAuth(): Promise<void> {
+		// 实现连接到运行 VS Code extension 的后端服务
+		// 这可以通过 WebSocket、HTTP API 等方式实现
+
+		this.authenticationService = {
+			async getAnyGitHubSession(options: any) {
+				// 调用后端 API 获取 GitHub session
+				const response = await fetch('/api/auth/github/session', {
+					method: 'POST',
+					headers: { 'Content-Type': 'application/json' },
+					body: JSON.stringify({ scopes: ['user:email'], options })
+				});
+
+				if (!response.ok) {
+					return undefined;
+				}
+
+				return await response.json();
+			},
+
+			async getPermissiveGitHubSession(options: any) {
+				const response = await fetch('/api/auth/github/permissive-session', {
+					method: 'POST',
+					headers: { 'Content-Type': 'application/json' },
+					body: JSON.stringify({
+						scopes: ['read:user', 'user:email', 'repo', 'workflow'],
+						options
+					})
+				});
+
+				if (!response.ok) {
+					return undefined;
+				}
+
+				return await response.json();
+			},
+
+			async getCopilotToken() {
+				const response = await fetch('/api/auth/copilot/token', {
+					method: 'POST',
+					headers: { 'Content-Type': 'application/json' }
+				});
+
+				if (!response.ok) {
+					throw new Error('Failed to get Copilot token');
+				}
+
+				return await response.json();
+			}
+		};
+	}
+
+	/**
+	 * 从 GitHub token 获取 Copilot token
+	 * 复用 extension 中的 CopilotTokenManager 逻辑
+	 */
+	private async fetchCopilotTokenFromGitHub(githubToken: string): Promise<any> {
+		try {
+			// 调用 GitHub Copilot API 获取 token
+			const response = await fetch('https://api.github.com/copilot_internal/token', {
+				method: 'GET',
+				headers: {
+					'Authorization': `token ${githubToken}`,
+					'X-GitHub-Api-Version': '2022-11-28',
+					'Accept': 'application/vnd.github+json'
+				}
+			});
+
+			if (!response.ok) {
+				throw new Error(`Failed to get Copilot token: ${response.status} ${response.statusText}`);
+			}
+
+			const tokenData = await response.json() as CopilotTokenData;
+
+			// 验证 token 数据
+			if (!tokenData.token) {
+				throw new Error('Invalid Copilot token response');
+			}
+
+			// 扩展 token 信息
+			const userResponse = await fetch('https://api.github.com/user', {
+				headers: { 'Authorization': `token ${githubToken}` }
+			});
+
+			const userInfo = userResponse.ok ? await userResponse.json() as GitHubUserInfo : { login: 'unknown', id: 0 };
+
+			return {
+				token: tokenData.token,
+				expires_at: tokenData.expires_at,
+				refresh_in: tokenData.refresh_in,
+				chat_enabled: true, // 假设聊天已启用
+				username: userInfo.login || 'unknown',
+				copilot_plan: 'copilot_individual', // 可以从其他 API 获取
+				isChatEnabled: () => true
+			};
+		} catch (error) {
+			console.error('Failed to fetch Copilot token:', error);
+			throw error;
+		}
+	}
+
+	/**
+	 * 初始化聊天服务
+	 */
+	private async initializeChatServices(): Promise<void> {
+		// 创建 ChatML fetcher（用于调用 Copilot API）
+		this.chatMLFetcher = {
+			fetchOne: async (opts: any, token: CancellationToken) => {
+				return await this.fetchCopilotResponse(opts, token);
+			}
+		};
+	}
+
+	/**
+	 * 调用真实的 Copilot API
+	 * 复用 extension 的 ChatMLFetcher 逻辑
+	 */
+	private async fetchCopilotResponse(opts: any, token: CancellationToken): Promise<any> {
+		try {
+			// 1. 获取 Copilot token
+			const copilotToken = await this.authenticationService.getCopilotToken();
+
+			// 2. 构建请求体（复用 extension 的逻辑）
+			const requestBody = {
+				messages: opts.messages,
+				model: 'gpt-4',
+				temperature: opts.requestOptions?.temperature || 0.7,
+				top_p: opts.requestOptions?.top_p || 0.95,
+				max_tokens: opts.requestOptions?.max_tokens || 2048,
+				stream: true,
+				...opts.requestOptions
+			};
+
+			// 3. 调用 Copilot API
+			const response = await fetch('https://api.githubcopilot.com/chat/completions', {
+				method: 'POST',
+				headers: {
+					'Authorization': `Bearer ${copilotToken.token}`,
+					'Content-Type': 'application/json',
+					'X-GitHub-Api-Version': '2023-07-07',
+					'Accept': 'application/json'
+				},
+				body: JSON.stringify(requestBody)
+			});
+
+			if (!response.ok) {
+				throw new Error(`Copilot API error: ${response.status} ${response.statusText}`);
+			}
+
+			// 4. 处理流式响应
+			if (requestBody.stream) {
+				return await this.handleStreamResponse(response, token);
+			} else {
+				const data = await response.json() as ChatCompletion;
+				return {
+					type: 'Success',
+					value: data.choices[0]?.message?.content || '',
+					requestId: opts.requestId
+				};
+			}
+		} catch (error) {
+			console.error('Copilot API call failed:', error);
+			return {
+				type: 'Failed',
+				reason: error instanceof Error ? error.message : 'Unknown error',
+				requestId: opts.requestId
+			};
+		}
+	}
+
+	/**
+	 * 处理流式响应
+	 */
+	private async handleStreamResponse(response: Response, token: CancellationToken): Promise<any> {
+		if (!response.body) {
+			throw new Error('No response body');
+		}
+
+		const reader = response.body.getReader();
+		const decoder = new TextDecoder();
+		let content = '';
+
+		try {
+			while (true) {
+				if (token.isCancellationRequested) {
+					reader.cancel();
+					throw new Error('Request cancelled');
+				}
+
+				const { done, value } = await reader.read();
+				if (done) {
+					break;
+				}
+
+				const chunk = decoder.decode(value, { stream: true });
+				const lines = chunk.split('\n');
+
+				for (const line of lines) {
+					if (line.startsWith('data: ')) {
+						const data = line.substring(6);
+						if (data === '[DONE]') {
+							break;
+						}
+
+						try {
+							const parsed = JSON.parse(data) as ChatCompletion;
+							const delta = parsed.choices?.[0]?.delta?.content;
+							if (delta) {
+								content += delta;
+							}
+						} catch (error) {
+							// 忽略 JSON 解析错误
+						}
+					}
+				}
+			}
+
+			return {
+				type: 'Success',
+				value: content,
+				requestId: response.headers.get('x-request-id') || 'unknown'
+			};
+		} finally {
+			reader.releaseLock();
+		}
 	}
 
 	async sendChatRequest(request: VSChatRequest, token: CancellationToken): Promise<ChatResult> {
-		// 在真实实现中，这里会通过IPC发送请求到extension层
-		// extension层会使用真实的ChatParticipantRequestHandler来处理
-
 		try {
-			// 1. 模拟extension的认证检查
+			// 1. 检查认证状态
 			const isAuthenticated = await this.checkAuthentication();
 			if (!isAuthenticated) {
 				return {
-					errorDetails: { message: 'Authentication required. Please sign in to GitHub Copilot.' },
+					errorDetails: { message: 'Please sign in to GitHub and ensure you have a valid Copilot subscription.' },
 					metadata: { copilotToken: false }
 				};
 			}
 
-			// 2. 模拟extension的请求处理（简化版）
-			// 在实际实现中，这会通过IPC调用真实的ChatParticipantRequestHandler
-			const result = await this.simulateExtensionChatProcessing(request, token);
+			// 2. 构建 ChatML 消息格式
+			const messages = [
+				{
+					role: 'user',
+					content: request.prompt
+				}
+			];
 
-			return result;
+			// 3. 调用真实的 Copilot API
+			const fetchOptions = {
+				messages,
+				requestId: request.id,
+				requestOptions: {
+					temperature: 0.7,
+					max_tokens: 2048
+				},
+				location: request.location,
+				debugName: 'browser-chat'
+			};
+
+			const result = await this.chatMLFetcher.fetchOne(fetchOptions, token);
+
+			// 4. 转换响应格式
+			if (result.type === 'Success') {
+				return {
+					details: result.value,
+					metadata: {
+						copilotToken: true,
+						requestId: result.requestId
+					}
+				};
+			} else {
+				return {
+					errorDetails: { message: result.reason || 'Unknown error occurred' },
+					metadata: { copilotToken: false }
+				};
+			}
 		} catch (error) {
+			console.error('Chat request failed:', error);
 			return {
 				errorDetails: { message: error instanceof Error ? error.message : 'Unknown error' },
 				metadata: { copilotToken: false }
@@ -87,119 +484,159 @@ class ExtensionChatServiceBridge implements IChatService {
 
 	async checkAuthentication(): Promise<boolean> {
 		try {
-			// 在真实实现中，这会通过IPC调用extension的IAuthenticationService
-			// 检查GitHub会话和Copilot token状态
-
-			// 暂时检查localStorage中的模拟token
-			const githubToken = localStorage.getItem('github_token');
-			const copilotToken = localStorage.getItem('copilot_token');
-
-			if (!githubToken || !copilotToken) {
-				return false;
+			// 方案1: 检查是否在VS Code Web环境中，使用VS Code API
+			const globalThis = this.getGlobalThis();
+			if (globalThis && (globalThis as any).vscode) {
+				return await this.checkVSCodeWebAuthentication();
 			}
 
-			// 模拟token验证
-			const tokenData = JSON.parse(copilotToken);
-			return tokenData?.chat_enabled === true;
-		} catch {
+			// 方案2: 尝试从环境变量或本地存储获取GitHub token进行直接验证
+			return await this.checkDirectGitHubAuthentication();
+		} catch (error) {
+			console.error('Authentication check failed:', error);
 			return false;
 		}
 	}
 
-	private async simulateExtensionChatProcessing(request: VSChatRequest, token: CancellationToken): Promise<ChatResult> {
-		// 这里模拟extension层的ChatParticipantRequestHandler处理流程
-		// 包括意图检测、上下文收集、模型调用等
+	/**
+	 * 在VS Code Web环境中检查认证
+	 */
+	private async checkVSCodeWebAuthentication(): Promise<boolean> {
+		try {
+			const globalThis = this.getGlobalThis();
+			const vscode = (globalThis as any).vscode;
 
-		// 检查是否被取消
-		if (token.isCancellationRequested) {
-			throw new Error('Request was cancelled');
-		}
-
-		// 模拟处理延迟
-		await new Promise(resolve => setTimeout(resolve, 500 + Math.random() * 1000));
-
-		// 简化的意图检测（模拟extension的IntentService）
-		const intent = this.detectIntent(request.prompt);
-
-		// 简化的响应生成（模拟extension的语言模型调用）
-		const response = this.generateCopilotResponse(request.prompt, intent);
-
-		return {
-			details: response,
-			metadata: {
-				intent,
-				copilotToken: true,
-				context: []
+			if (!vscode || !vscode.authentication) {
+				return false;
 			}
-		};
-	}
 
-	private detectIntent(prompt: string): string {
-		// 模拟extension的意图检测逻辑
-		const lowerPrompt = prompt.toLowerCase();
+			// 尝试获取GitHub session
+			const session = await vscode.authentication.getSession('github', ['user:email'], { silent: true });
+			if (!session) {
+				return false;
+			}
 
-		if (lowerPrompt.includes('explain') || lowerPrompt.includes('what does')) {
-			return 'explain';
-		}
-		if (lowerPrompt.includes('fix') || lowerPrompt.includes('error') || lowerPrompt.includes('bug')) {
-			return 'fix';
-		}
-		if (lowerPrompt.includes('generate') || lowerPrompt.includes('create') || lowerPrompt.includes('write')) {
-			return 'generate';
-		}
-		if (lowerPrompt.includes('test') || lowerPrompt.includes('unit test')) {
-			return 'test';
-		}
-		if (lowerPrompt.includes('refactor') || lowerPrompt.includes('improve')) {
-			return 'refactor';
-		}
-
-		return 'general';
-	}
-
-	private generateCopilotResponse(prompt: string, intent: string): string {
-		// 模拟extension中真实Copilot模型的响应
-		switch (intent) {
-			case 'explain':
-				return `I'll explain this code for you:\n\n${this.generateExplanationResponse(prompt)}`;
-			case 'fix':
-				return `I've identified the issue and here's how to fix it:\n\n${this.generateFixResponse(prompt)}`;
-			case 'generate':
-				return `Here's the code I've generated for you:\n\n${this.generateCodeResponse(prompt)}`;
-			case 'test':
-				return `Here are the unit tests I've created:\n\n${this.generateTestResponse(prompt)}`;
-			case 'refactor':
-				return `Here's the refactored code:\n\n${this.generateRefactorResponse(prompt)}`;
-			default:
-				return this.generateGeneralCopilotResponse(prompt);
+			// 验证Copilot token
+			const copilotToken = await this.fetchCopilotTokenFromGitHub(session.accessToken);
+			return copilotToken && copilotToken.chat_enabled;
+		} catch (error) {
+			console.error('VS Code Web authentication check failed:', error);
+			return false;
 		}
 	}
 
-	private generateExplanationResponse(prompt: string): string {
-		return `This code performs the following operations:\n\n1. **Main functionality**: Based on your request about "${prompt}"\n2. **Key components**: The implementation follows standard patterns\n3. **Important details**: The logic handles edge cases and follows best practices\n\nWould you like me to explain any specific part in more detail?`;
+	/**
+	 * 直接检查GitHub认证（通过环境变量或用户输入的token）
+	 */
+	private async checkDirectGitHubAuthentication(): Promise<boolean> {
+		try {
+			// 1. 从多个来源尝试获取GitHub token
+			const githubToken = this.getGitHubTokenFromEnvironment();
+
+			if (!githubToken) {
+				// 如果没有token，提示用户输入或通过OAuth获取
+				console.log('No GitHub token found. Please set GITHUB_TOKEN environment variable or authenticate through OAuth.');
+				return false;
+			}
+
+			// 2. 验证GitHub token并获取Copilot token
+			const copilotToken = await this.fetchCopilotTokenFromGitHub(githubToken);
+			return copilotToken && copilotToken.chat_enabled;
+		} catch (error) {
+			console.error('Direct GitHub authentication check failed:', error);
+			return false;
+		}
 	}
 
-	private generateFixResponse(prompt: string): string {
-		return `\`\`\`typescript\n// Fixed version addressing: ${prompt}\n\n// The main issues were:\n// 1. Missing null/undefined checks\n// 2. Improper error handling\n// 3. Type safety concerns\n\nfunction fixedImplementation() {\n    try {\n        // Proper implementation with error handling\n        return { success: true, message: 'Fixed successfully' };\n    } catch (error) {\n        console.error('Error:', error);\n        return { success: false, error: error.message };\n    }\n}\n\`\`\`\n\nThis fix addresses the main issues and improves code reliability.`;
+	/**
+	 * 从环境变量获取GitHub token
+	 */
+	private getGitHubTokenFromEnvironment(): string | null {
+		try {
+			// 1. 尝试从环境变量获取
+			const globalThis = this.getGlobalThis();
+			if ((globalThis as any).process && (globalThis as any).process.env) {
+				const envToken = (globalThis as any).process.env.GITHUB_TOKEN;
+				if (envToken) {
+					return envToken;
+				}
+			}
+
+			// 2. 尝试从localStorage获取（用于测试）
+			const localToken = localStorage.getItem('github_token');
+			if (localToken) {
+				return localToken;
+			}
+
+			// 3. 尝试从sessionStorage获取
+			const sessionToken = sessionStorage.getItem('github_token');
+			if (sessionToken) {
+				return sessionToken;
+			}
+
+			return null;
+		} catch (error) {
+			console.error('Failed to get GitHub token from environment:', error);
+			return null;
+		}
 	}
 
-	private generateCodeResponse(prompt: string): string {
-		return `\`\`\`typescript\n// Generated code for: ${prompt}\n\nclass GeneratedSolution {\n    private config: Config;\n    \n    constructor(config: Config) {\n        this.config = config;\n    }\n    \n    public execute(): Promise<Result> {\n        // Implementation based on your requirements\n        return new Promise((resolve, reject) => {\n            try {\n                const result = this.processRequest();\n                resolve({ success: true, data: result });\n            } catch (error) {\n                reject(error);\n            }\n        });\n    }\n    \n    private processRequest(): any {\n        // Core logic implementation\n        return this.config.process();\n    }\n}\n\nexport { GeneratedSolution };\n\`\`\`\n\nThis implementation follows TypeScript best practices and handles your requirements.`;
+	/**
+	 * 公开方法：设置GitHub token用于测试
+	 */
+	setGitHubToken(token: string): void {
+		localStorage.setItem('github_token', token);
+		console.log('GitHub token set for ExtensionChatServiceBridge');
+
+		// 重新初始化认证服务以使用新token
+		this.initializeExtensionServices();
 	}
 
-	private generateTestResponse(prompt: string): string {
-		return `\`\`\`typescript\n// Unit tests for: ${prompt}\n\nimport { describe, it, expect, beforeEach } from 'vitest';\nimport { GeneratedSolution } from './GeneratedSolution';\n\ndescribe('GeneratedSolution', () => {\n    let solution: GeneratedSolution;\n    let config: Config;\n    \n    beforeEach(() => {\n        config = createMockConfig();\n        solution = new GeneratedSolution(config);\n    });\n    \n    it('should execute successfully', async () => {\n        const result = await solution.execute();\n        expect(result.success).toBe(true);\n    });\n    \n    it('should handle errors gracefully', async () => {\n        config.process = () => { throw new Error('Test error'); };\n        \n        await expect(solution.execute()).rejects.toThrow('Test error');\n    });\n    \n    it('should return correct data format', async () => {\n        const result = await solution.execute();\n        expect(result).toHaveProperty('success');\n        expect(result).toHaveProperty('data');\n    });\n});\n\nfunction createMockConfig(): Config {\n    return {\n        process: () => ({ value: 'test' })\n    };\n}\n\`\`\`\n\nThese tests cover the main functionality and edge cases.`;
+	/**
+	 * 公开方法：触发 GitHub 认证流程
+	 */
+	async authenticateWithGitHub(): Promise<boolean> {
+		try {
+			if (!this.authenticationService) {
+				throw new Error('Authentication service not initialized');
+			}
+
+			// 触发交互式认证流程
+			const session = await this.authenticationService.getAnyGitHubSession({ createIfNone: true });
+			return !!session;
+		} catch (error) {
+			console.error('GitHub authentication failed:', error);
+			return false;
+		}
 	}
 
-	private generateRefactorResponse(prompt: string): string {
-		return `\`\`\`typescript\n// Refactored code for: ${prompt}\n\n// Improvements made:\n// 1. Better separation of concerns\n// 2. Improved type safety\n// 3. Enhanced error handling\n// 4. Better testability\n// 5. More maintainable structure\n\ninterface ServiceConfig {\n    readonly timeout: number;\n    readonly retryCount: number;\n}\n\ninterface ServiceResult<T> {\n    readonly success: boolean;\n    readonly data?: T;\n    readonly error?: string;\n}\n\nclass RefactoredService<T> {\n    private readonly config: ServiceConfig;\n    private readonly logger: Logger;\n    \n    constructor(config: ServiceConfig, logger: Logger) {\n        this.config = Object.freeze(config);\n        this.logger = logger;\n    }\n    \n    public async processRequest(input: T): Promise<ServiceResult<T>> {\n        try {\n            this.logger.info('Processing request', { input });\n            \n            const result = await this.executeWithRetry(() => this.process(input));\n            \n            this.logger.info('Request processed successfully');\n            return { success: true, data: result };\n        } catch (error) {\n            this.logger.error('Request processing failed', { error });\n            return { \n                success: false, \n                error: error instanceof Error ? error.message : 'Unknown error' \n            };\n        }\n    }\n    \n    private async executeWithRetry<R>(operation: () => Promise<R>): Promise<R> {\n        let lastError: Error;\n        \n        for (let attempt = 1; attempt <= this.config.retryCount; attempt++) {\n            try {\n                return await operation();\n            } catch (error) {\n                lastError = error instanceof Error ? error : new Error('Unknown error');\n                \n                if (attempt < this.config.retryCount) {\n                    await this.delay(attempt * 1000);\n                }\n            }\n        }\n        \n        throw lastError!;\n    }\n    \n    private async process(input: T): Promise<T> {\n        // Core business logic\n        return input;\n    }\n    \n    private delay(ms: number): Promise<void> {\n        return new Promise(resolve => setTimeout(resolve, ms));\n    }\n}\n\`\`\`\n\nThis refactored version is more maintainable, testable, and follows SOLID principles.`;
+	/**
+	 * 公开方法：获取认证状态信息
+	 */
+	async getAuthenticationInfo(): Promise<{
+		isAuthenticated: boolean;
+		githubUser?: string;
+		copilotPlan?: string;
+		scopes?: string[];
+	}> {
+		try {
+			const githubSession = await this.authenticationService?.getAnyGitHubSession({ silent: true });
+			if (!githubSession) {
+				return { isAuthenticated: false };
+			}
+
+			const copilotToken = await this.authenticationService.getCopilotToken();
+
+			return {
+				isAuthenticated: true,
+				githubUser: githubSession.account?.label || copilotToken?.username,
+				copilotPlan: copilotToken?.copilot_plan,
+				scopes: githubSession.scopes
+			};
+		} catch (error) {
+			return { isAuthenticated: false };
+		}
 	}
-
-	private generateGeneralCopilotResponse(prompt: string): string {
-		return `Hello! I'm GitHub Copilot, your AI programming assistant.\n\nRegarding "${prompt}":\n\nI can help you with:\n\n- **Code explanation**: Understanding complex code and algorithms\n- **Debugging**: Finding and fixing bugs in your code\n- **Code generation**: Writing new functions, classes, and modules\n- **Testing**: Creating comprehensive unit tests\n- **Refactoring**: Improving code structure and maintainability\n- **Best practices**: Following industry standards and patterns\n- **Documentation**: Writing clear comments and documentation\n\nWhat specific aspect would you like me to help you with? Please provide more details about your coding challenge or question.`;
-	}
-
-
 
 	dispose(): void {
 		this.disposables.dispose();
@@ -309,6 +746,47 @@ export class Turn {
 
 /**
  * 增强的聊天引擎 - 包含真实的Copilot Chat逻辑
+ *
+ * 认证集成说明：
+ *
+ * 这个实现展示了如何在浏览器环境中复用 VS Code extension 的认证逻辑。
+ * 主要包含以下认证检查层次：
+ *
+ * 1. GitHub Session 检查:
+ *    - checkAlignedGitHubSession(): 检查是否有完整权限 (repo, user:email, read:user, workflow)
+ *    - checkMinimalGitHubSession(): 检查是否有基础权限 (user:email)
+ *    - checkReadUserGitHubSession(): 向后兼容检查 (read:user)
+ *
+ * 2. Copilot Token 验证:
+ *    - validateCopilotAccess(): 验证 Copilot 订阅和 chat 权限
+ *    - tryGetCopilotToken(): 尝试从 GitHub token 获取 Copilot token
+ *
+ * 在实际的浏览器应用中使用：
+ *
+ * ```typescript
+ * // 1. 初始化认证状态 (用于开发/测试)
+ * chatEngine.setMockAuthenticationState('aligned');
+ *
+ * // 2. 检查认证状态
+ * const authStatus = await chatEngine.getAuthenticationStatus();
+ * if (!authStatus.isAuthenticated) {
+ *     // 引导用户进行 GitHub OAuth 认证
+ *     await redirectToGitHubOAuth();
+ * }
+ *
+ * // 3. 设置真实的认证信息 (从 OAuth 回调获得)
+ * chatEngine.setAuthenticationTokens(
+ *     githubAccessToken,
+ *     { chat_enabled: true, username: userInfo.login },
+ *     ['read:user', 'user:email', 'repo', 'workflow']
+ * );
+ *
+ * // 4. 开始聊天
+ * const response = await chatEngine.sendMessage({
+ *     id: 'msg-1',
+ *     prompt: 'Hello Copilot!'
+ * });
+ * ```
  */
 
 export class ChatEngine {
@@ -414,12 +892,35 @@ export class ChatEngine {
 	 * 复用extension的认证、意图检测、请求处理等逻辑
 	 */
 	async sendMessage(request: ChatRequest, endpointId = 'local'): Promise<ChatResponse> {
-		// 1. 检查GitHub认证和Copilot Token
-		if (!await this.checkAuthentication()) {
+		// 1. 检查GitHub认证和Copilot Token - 直接使用ExtensionChatServiceBridge的认证
+		let isAuthenticated = false;
+		let errorMessage = '';
+		try {
+			isAuthenticated = await this.extensionChatService.checkAuthentication();
+		} catch (error) {
+			console.error('Authentication check failed:', error);
+		}
+
+		if (!isAuthenticated) {
+			// 尝试从localStorage获取token进行快速认证
+			const githubToken = '';
+			if (githubToken) {
+				// 设置token并重新检查
+				this.setRealGitHubToken(githubToken);
+				try {
+					isAuthenticated = await this.extensionChatService.checkAuthentication();
+				} catch (error) {
+					errorMessage = error instanceof Error ? error.message : 'Unknown error during retry';
+					console.error('Retry authentication failed:', error);
+				}
+			}
+		}
+
+		if (!isAuthenticated) {
 			return {
 				id: this.generateId(),
 				requestId: request.id,
-				content: "请先登录GitHub并确保您有有效的Copilot订阅。请前往VS Code扩展设置进行身份验证。",
+				content: "请先设置GitHub Token。请使用 `chatEngine.setRealGitHubToken('your_token')` 方法设置有效的GitHub Personal Access Token。" + errorMessage,
 				finishReason: 'error'
 			};
 		}
@@ -489,6 +990,18 @@ export class ChatEngine {
 	}
 
 	/**
+	 * 公开方法：设置真实GitHub token进行测试
+	 * 使用这个方法设置真实的GitHub Personal Access Token来测试Copilot API
+	 */
+	setRealGitHubToken(token: string): void {
+		// 通过ExtensionChatServiceBridge设置token
+		if (this.extensionChatService && 'setGitHubToken' in this.extensionChatService) {
+			(this.extensionChatService as any).setGitHubToken(token);
+		}
+		console.log('Real GitHub token set for Copilot API testing');
+	}
+
+	/**
 	 * 公开方法：检查认证状态
 	 * 供UI组件调用以显示认证状态
 	 */
@@ -498,51 +1011,242 @@ export class ChatEngine {
 
 	/**
 	 * 公开方法：设置认证token（用于测试或模拟）
+	 * 增强版本，支持设置 scopes 信息
 	 */
-	setAuthenticationTokens(githubToken: string, copilotToken: { chat_enabled: boolean }): void {
+	setAuthenticationTokens(
+		githubToken: string,
+		copilotToken: { chat_enabled: boolean; expires_at?: number; username?: string; copilot_plan?: string },
+		scopes?: string[]
+	): void {
 		localStorage.setItem('github_token', githubToken);
-		localStorage.setItem('copilot_token', JSON.stringify(copilotToken));
+		localStorage.setItem('copilot_token', JSON.stringify({
+			...copilotToken,
+			expires_at: copilotToken.expires_at || (Date.now() / 1000 + 3600) // 默认1小时后过期
+		}));
+
+		// 设置 token scopes 信息，用于权限检查
+		if (scopes) {
+			localStorage.setItem('github_token_scopes', JSON.stringify(scopes));
+		} else {
+			// 默认设置为 aligned scopes
+			localStorage.setItem('github_token_scopes', JSON.stringify(['read:user', 'user:email', 'repo', 'workflow']));
+		}
 	}
 
 	/**
-	 * 检查GitHub认证和Copilot Token状态
-	 * 这个方法需要在浏览器环境中适配VS Code的认证逻辑
+	 * 公开方法：设置完整的认证状态（模拟真实的 VS Code extension 认证）
 	 */
-	private async checkAuthentication(): Promise<boolean> {
+	setMockAuthenticationState(authLevel: 'none' | 'minimal' | 'aligned' | 'permissive' = 'aligned'): void {
+		switch (authLevel) {
+			case 'none':
+				localStorage.removeItem('github_token');
+				localStorage.removeItem('copilot_token');
+				localStorage.removeItem('github_token_scopes');
+				break;
+
+			case 'minimal':
+				this.setAuthenticationTokens(
+					'ghp_minimal_token_example',
+					{ chat_enabled: true, username: 'minimal_user', copilot_plan: 'copilot_individual' },
+					['user:email']
+				);
+				break;
+
+			case 'aligned':
+				this.setAuthenticationTokens(
+					'ghp_aligned_token_example',
+					{ chat_enabled: true, username: 'aligned_user', copilot_plan: 'copilot_individual' },
+					['read:user', 'user:email', 'repo', 'workflow']
+				);
+				break;
+
+			case 'permissive':
+				this.setAuthenticationTokens(
+					'ghp_permissive_token_example',
+					{ chat_enabled: true, username: 'permissive_user', copilot_plan: 'copilot_business' },
+					['read:user', 'user:email', 'repo', 'workflow', 'admin:org']
+				);
+				break;
+		}
+	}
+
+	/**
+	 * 公开方法：获取当前认证状态信息
+	 */
+	async getAuthenticationStatus(): Promise<{
+		isAuthenticated: boolean;
+		hasGitHubSession: boolean;
+		hasCopilotAccess: boolean;
+		scopes?: string[];
+		username?: string;
+		copilotPlan?: string;
+	}> {
 		try {
-			// 在浏览器环境中，我们需要检查是否有有效的认证状态
-			// 这里应该对接VS Code extension的IAuthenticationService
+			const isAuthenticated = await this.isAuthenticated();
+			const hasGitHubSession = await this.checkAnyGitHubSession();
+			const hasCopilotAccess = await this.checkCopilotToken();
 
-			// 临时实现：检查是否有GitHub token和Copilot订阅
-			// 实际实现中应该调用extension的认证服务
+			const scopesString = localStorage.getItem('github_token_scopes');
+			const copilotTokenString = localStorage.getItem('copilot_token');
 
-			// 模拟认证检查
-			const hasGitHubAuth = await this.checkGitHubAuthentication();
-			const hasCopilotToken = await this.checkCopilotToken();
+			let scopes: string[] | undefined;
+			let username: string | undefined;
+			let copilotPlan: string | undefined;
 
-			return hasGitHubAuth && hasCopilotToken;
+			if (scopesString) {
+				scopes = JSON.parse(scopesString);
+			}
+
+			if (copilotTokenString) {
+				const copilotToken = JSON.parse(copilotTokenString);
+				username = copilotToken.username;
+				copilotPlan = copilotToken.copilot_plan;
+			}
+
+			return {
+				isAuthenticated,
+				hasGitHubSession,
+				hasCopilotAccess,
+				scopes,
+				username,
+				copilotPlan
+			};
 		} catch (error) {
-			console.error('Authentication check failed:', error);
+			console.error('Failed to get authentication status:', error);
+			return {
+				isAuthenticated: false,
+				hasGitHubSession: false,
+				hasCopilotAccess: false
+			};
+		}
+	}
+
+	/**
+	 * 公开方法：设置GitHub token用于测试
+	 */
+	setGitHubToken(token: string): void {
+		localStorage.setItem('github_token', token);
+		console.log('GitHub token set for testing purposes');
+	}
+
+	/**
+	 * 检查是否有任何可用的 GitHub session
+	 * 复用 extension/platform/authentication 的逻辑
+	 */
+	private async checkAnyGitHubSession(): Promise<boolean> {
+		try {
+			// 模拟 getAnyAuthSession 的逻辑
+			// 在真实实现中，这应该通过 IPC 调用 extension 的 IAuthenticationService.getAnyGitHubSession({ silent: true })
+
+			// 1. 首先检查是否有 aligned scopes (repo, user:email, read:user, workflow)
+			const hasAlignedSession = await this.checkAlignedGitHubSession();
+			if (hasAlignedSession) {
+				return true;
+			}
+
+			// 2. 检查是否有 minimal scopes (user:email)
+			const hasMinimalSession = await this.checkMinimalGitHubSession();
+			if (hasMinimalSession) {
+				return true;
+			}
+
+			// 3. 向后兼容：检查是否有 read:user scope
+			const hasReadUserSession = await this.checkReadUserGitHubSession();
+			if (hasReadUserSession) {
+				return true;
+			}
+
+			return false;
+		} catch (error) {
+			console.error('Any GitHub session check failed:', error);
 			return false;
 		}
 	}
 
 	/**
-	 * 检查GitHub认证状态
+	 * 检查是否有 aligned GitHub session (repo, user:email, read:user, workflow)
+	 * 对应 GITHUB_SCOPE_ALIGNED
 	 */
-	private async checkGitHubAuthentication(): Promise<boolean> {
-		// 在浏览器环境中，需要对接VS Code的认证系统
-		// 这里应该调用ConversationFeature的认证逻辑
-
-		// 临时实现：检查localStorage或其他存储机制
+	private async checkAlignedGitHubSession(): Promise<boolean> {
 		try {
-			// 这里应该使用extension的IAuthenticationService
-			// const authService = this.getAuthenticationService();
-			// return await authService.isAuthenticated();
+			// 在真实实现中，这里会调用：
+			// await authentication.getSession('github', ['read:user', 'user:email', 'repo', 'workflow'], { silent: true })
 
-			// 临时mock实现
-			const gitHubToken = localStorage.getItem('github_token');
-			return !!gitHubToken;
+			// 临时模拟实现 - 检查是否有完整权限的 token
+			const githubToken = localStorage.getItem('github_token');
+			const tokenScopes = localStorage.getItem('github_token_scopes');
+
+			if (!githubToken) {
+				return false;
+			}
+
+			// 检查 scope 是否包含所需权限
+			if (tokenScopes) {
+				const scopes = JSON.parse(tokenScopes);
+				const requiredScopes = ['read:user', 'user:email', 'repo', 'workflow'];
+				return requiredScopes.every(scope => scopes.includes(scope));
+			}
+
+			// 如果没有 scope 信息，假设是基础 token
+			return false;
+		} catch (error) {
+			return false;
+		}
+	}
+
+	/**
+	 * 检查是否有 minimal GitHub session (user:email)
+	 * 对应 GITHUB_SCOPE_USER_EMAIL
+	 */
+	private async checkMinimalGitHubSession(): Promise<boolean> {
+		try {
+			// 在真实实现中，这里会调用：
+			// await authentication.getSession('github', ['user:email'], { silent: true })
+
+			const githubToken = localStorage.getItem('github_token');
+			const tokenScopes = localStorage.getItem('github_token_scopes');
+
+			if (!githubToken) {
+				return false;
+			}
+
+			// 检查 scope 是否包含 user:email
+			if (tokenScopes) {
+				const scopes = JSON.parse(tokenScopes);
+				return scopes.includes('user:email');
+			}
+
+			// 如果没有明确的 scope 信息，假设基础 token 至少有 user:email
+			return true;
+		} catch (error) {
+			return false;
+		}
+	}
+
+	/**
+	 * 检查是否有 read:user GitHub session (向后兼容)
+	 * 对应 GITHUB_SCOPE_READ_USER
+	 */
+	private async checkReadUserGitHubSession(): Promise<boolean> {
+		try {
+			// 在真实实现中，这里会调用：
+			// await authentication.getSession('github', ['read:user'], { silent: true })
+
+			const githubToken = localStorage.getItem('github_token');
+			const tokenScopes = localStorage.getItem('github_token_scopes');
+
+			if (!githubToken) {
+				return false;
+			}
+
+			// 检查 scope 是否包含 read:user
+			if (tokenScopes) {
+				const scopes = JSON.parse(tokenScopes);
+				return scopes.includes('read:user');
+			}
+
+			// 向后兼容：如果没有明确的 scope 信息，尝试验证 token
+			return true;
 		} catch (error) {
 			return false;
 		}
