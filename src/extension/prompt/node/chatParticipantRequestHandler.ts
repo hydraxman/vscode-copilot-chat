@@ -219,6 +219,7 @@ export class ChatParticipantRequestHandler {
 			// sanitize the variables of all requests
 			// this is done here because all intents must honor ignored files
 			this.request = await this.sanitizeVariables();
+			this._logService.warn(`用户指令：${this.request.prompt ?? ''}`);
 
 			const command = this.chatAgentArgs.intentId ?
 				this._commandService.getCommand(this.chatAgentArgs.intentId, this.location) :

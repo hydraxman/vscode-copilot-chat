@@ -42,6 +42,7 @@ import { SummarizedConversationHistoryMetadata } from '../../prompts/node/agent/
 import { normalizeToolSchema } from '../../tools/common/toolSchemaNormalizer';
 import { ToolCallCancelledError } from '../../tools/common/toolsService';
 import { IToolGrouping, IToolGroupingService } from '../../tools/common/virtualTools/virtualToolTypes';
+import { ChatVariablesCollection } from '../common/chatVariablesCollection';
 import { Conversation, getUniqueReferences, GlobalContextMessageMetadata, IResultMetadata, RenderedUserMessageMetadata, RequestDebugInformation, ResponseStreamParticipant, Turn, TurnStatus } from '../common/conversation';
 import { IBuildPromptContext, IToolCallRound } from '../common/intents';
 import { ChatTelemetry, ChatTelemetryBuilder } from './chatParticipantTelemetry';
@@ -49,7 +50,6 @@ import { IntentInvocationMetadata } from './conversation';
 import { IDocumentContext } from './documentContext';
 import { IBuildPromptResult, IIntent, IIntentInvocation, IResponseProcessor } from './intents';
 import { ConversationalBaseTelemetryData, createTelemetryWithId, sendModelMessageTelemetry } from './telemetry';
-import { ChatVariablesCollection } from '../common/chatVariablesCollection';
 
 export interface IDefaultIntentRequestHandlerOptions {
 	maxToolCallIterations: number;
@@ -249,9 +249,15 @@ export class DefaultIntentRequestHandler {
 		participants.push(stream => ChatResponseStreamImpl.spy(stream, (part) => {
 			if (part instanceof ChatResponseMarkdownPart) {
 				this._loop.telemetry.markEmittedMarkdown(part.value);
+				this._logService.info(`新的聊天渲染文字：${part.value.value}`);
+			}
+			if (part instanceof ChatResponseProgressPart) {
+				const progressValue = (part as any).value ?? (part as any).message ?? '';
+				this._logService.info(`新的进度更新：${progressValue}`);
 			}
 			if (part instanceof ChatResponseTextEditPart) {
 				this._loop.telemetry.markEmittedEdits(part.uri, part.edits);
+				this._logService.info(`新ChatResponseTextEditPart url：${part.uri} 新ChatResponseTextEditPart edits: ${part.edits}`);
 			}
 		}));
 
