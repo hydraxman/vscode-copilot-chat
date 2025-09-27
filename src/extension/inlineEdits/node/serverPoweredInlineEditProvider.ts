@@ -6,7 +6,7 @@
 import { IChatMLFetcher } from '../../../platform/chat/common/chatMLFetcher';
 import { Permutation } from '../../../platform/inlineEdits/common/dataTypes/permutation';
 import { InlineEditRequestLogContext } from '../../../platform/inlineEdits/common/inlineEditLogContext';
-import { DocumentShorteningStrategy, ISerializedNextEditRequest, IStatelessNextEditProvider, NoNextEditReason, PushEdit, StatelessNextEditRequest, StatelessNextEditResult, StatelessNextEditTelemetryBuilder } from '../../../platform/inlineEdits/common/statelessNextEditProvider';
+import { ISerializedNextEditRequest, IStatelessNextEditProvider, NoNextEditReason, PushEdit, StatelessNextEditRequest, StatelessNextEditResult, StatelessNextEditTelemetryBuilder } from '../../../platform/inlineEdits/common/statelessNextEditProvider';
 import { fromUnknown } from '../../../util/common/errors';
 import { Result } from '../../../util/common/result';
 import { assert } from '../../../util/vs/base/common/assert';
@@ -43,8 +43,6 @@ export class ServerPoweredInlineEditProvider implements IStatelessNextEditProvid
 	public readonly ID: string = ServerPoweredInlineEditProvider.ID;
 
 	public readonly dependsOnSelection = true;
-
-	public readonly documentShorteningStrategy = DocumentShorteningStrategy.NoShortening;
 
 	constructor(
 		@IChatMLFetcher private readonly fetcher: IChatMLFetcher,
@@ -95,7 +93,7 @@ export class ServerPoweredInlineEditProvider implements IStatelessNextEditProvid
 			const edits = response.edits.map(e => LineReplacement.deserialize(e));
 			const sortingPermutation = Permutation.createSortPermutation(edits, (a, b) => a.lineRange.startLineNumber - b.lineRange.startLineNumber);
 			const lineEdit = new LineEdit(sortingPermutation.apply(edits));
-			lineEdit.edits.forEach(edit => pushEdit(Result.ok({ edit })));
+			lineEdit.replacements.forEach(edit => pushEdit(Result.ok({ edit })));
 			pushEdit(Result.error(new NoNextEditReason.NoSuggestions(request.documentBeforeEdits, undefined)));
 			return StatelessNextEditResult.streaming(telemetryBuilder);
 		} else {

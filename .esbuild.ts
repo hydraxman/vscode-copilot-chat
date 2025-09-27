@@ -45,7 +45,7 @@ const baseNodeBuildOptions = {
 	mainFields: ["module", "main"], // needed for jsonc-parser,
 	define: {
 		'process.env.APPLICATIONINSIGHTS_CONFIGURATION_CONTENT': '"{}"'
-	}
+	},
 } satisfies esbuild.BuildOptions;
 
 const nodeExtHostTestGlobs = [
@@ -59,11 +59,13 @@ const testBundlePlugin: esbuild.Plugin = {
 	name: 'testBundlePlugin',
 	setup(build) {
 		build.onResolve({ filter: /[\/\\]test-extension\.ts$/ }, args => {
-			if (args.kind !== 'entry-point') return;
+			if (args.kind !== 'entry-point') {
+				return;
+			}
 			return { path: path.resolve(args.path) };
 		});
 		build.onLoad({ filter: /[\/\\]test-extension\.ts$/ }, async args => {
-			let files = await glob(nodeExtHostTestGlobs, { cwd: REPO_ROOT, posix: true });
+			let files = await glob(nodeExtHostTestGlobs, { cwd: REPO_ROOT, posix: true, ignore: ['src/extension/completions-core/**/*'] });
 			files = files.map(f => path.posix.relative('src', f));
 			if (files.length === 0) {
 				throw new Error('No extension tests found');
@@ -87,11 +89,13 @@ const sanityTestBundlePlugin: esbuild.Plugin = {
 	name: 'sanityTestBundlePlugin',
 	setup(build) {
 		build.onResolve({ filter: /[\/\\]sanity-test-extension\.ts$/ }, args => {
-			if (args.kind !== 'entry-point') return;
+			if (args.kind !== 'entry-point') {
+				return;
+			}
 			return { path: path.resolve(args.path) };
 		});
 		build.onLoad({ filter: /[\/\\]sanity-test-extension\.ts$/ }, async args => {
-			let files = await glob(nodeExtHostSanityTestGlobs, { cwd: REPO_ROOT, posix: true });
+			let files = await glob(nodeExtHostSanityTestGlobs, { cwd: REPO_ROOT, posix: true, ignore: ['src/extension/completions-core/**/*'] });
 			files = files.map(f => path.posix.relative('src', f));
 			if (files.length === 0) {
 				throw new Error('No extension tests found');
@@ -102,6 +106,23 @@ const sanityTestBundlePlugin: esbuild.Plugin = {
 					.join(''),
 				watchDirs: files.map(path.dirname),
 				watchFiles: files,
+			};
+		});
+	}
+};
+
+const importMetaPlugin: esbuild.Plugin = {
+	name: 'claudeCodeImportMetaPlugin',
+	setup(build) {
+		// Handle import.meta.url in @anthropic-ai/claude-code package
+		build.onLoad({ filter: /node_modules[\/\\]@anthropic-ai[\/\\]claude-code[\/\\].*\.mjs$/ }, async (args) => {
+			const contents = await fs.promises.readFile(args.path, 'utf8');
+			return {
+				contents: contents.replace(
+					/import\.meta\.url/g,
+					'require("url").pathToFileURL(__filename).href'
+				),
+				loader: 'js'
 			};
 		});
 	}
@@ -153,7 +174,7 @@ const nodeExtHostBuildOptions = {
 		{ in: './src/sanity-test-extension.ts', out: 'sanity-test-extension' },
 	],
 	loader: { '.ps1': 'text' },
-	plugins: [testBundlePlugin, sanityTestBundlePlugin],
+	plugins: [testBundlePlugin, sanityTestBundlePlugin, importMetaPlugin],
 	external: [
 		...baseNodeBuildOptions.external,
 		'vscode'
@@ -169,6 +190,7 @@ const webExtHostBuildOptions = {
 	format: 'cjs', // Necessary to export activate function from bundle for extension
 	external: [
 		'vscode',
+		'http',
 	]
 } satisfies esbuild.BuildOptions;
 
@@ -213,12 +235,12 @@ const nodeSimulationWorkbenchUIBuildOptions = {
 		'child_process',
 		'http',
 		'assert',
-	]
+	],
 } satisfies esbuild.BuildOptions;
 
 async function typeScriptServerPluginPackageJsonInstall(): Promise<void> {
 	await mkdir('./node_modules/@vscode/copilot-typescript-server-plugin', { recursive: true });
-	const source = path.join(__dirname, './src/extension/typescriptContext/serverPlugin/package.json')
+	const source = path.join(__dirname, './src/extension/typescriptContext/serverPlugin/package.json');
 	const destination = path.join(__dirname, './node_modules/@vscode/copilot-typescript-server-plugin/package.json');
 	try {
 		await copyFile(source, destination);
@@ -270,7 +292,7 @@ async function main() {
 		const nodeSimulationWorkbenchUIContext = await esbuild.context(nodeSimulationWorkbenchUIBuildOptions);
 		contexts.push(nodeSimulationWorkbenchUIContext);
 
-		const nodeExtHostSimulationContext = await esbuild.context(nodeExtHostSimulationTestOptions)
+		const nodeExtHostSimulationContext = await esbuild.context(nodeExtHostSimulationTestOptions);
 		contexts.push(nodeExtHostSimulationContext);
 
 		const typeScriptServerPluginContext = await esbuild.context(typeScriptServerPluginBuildOptions);
@@ -318,6 +340,7 @@ async function main() {
 				`**/*.w.json`,
 				'**/*.sqlite',
 				'**/*.sqlite-journal',
+				'test/aml/out/**'
 			]
 		});
 		rebuild();
