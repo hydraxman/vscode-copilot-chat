@@ -24,6 +24,7 @@ import { IEndpointProvider } from '../../../platform/endpoint/common/endpointPro
 import { CAPIClientImpl } from '../../../platform/endpoint/node/capiClientImpl';
 import { DomainService } from '../../../platform/endpoint/node/domainServiceImpl';
 import { INativeEnvService, isScenarioAutomation } from '../../../platform/env/common/envService';
+import { NativeEnvServiceImpl } from '../../../platform/env/vscode-node/nativeEnvServiceImpl';
 import { IGitCommitMessageService } from '../../../platform/git/common/gitCommitMessageService';
 import { IGitDiffService } from '../../../platform/git/common/gitDiffService';
 import { IGithubRepositoryService } from '../../../platform/github/common/githubService';
@@ -95,6 +96,8 @@ import { RequestLogger } from '../../prompt/vscode-node/requestLoggerImpl';
 import { SettingsEditorSearchServiceImpl } from '../../prompt/vscode-node/settingsEditorSearchServiceImpl';
 import { CodeMapperService, ICodeMapperService } from '../../prompts/node/codeMapper/codeMapperService';
 import { FixCookbookService, IFixCookbookService } from '../../prompts/node/inline/fixCookbookService';
+import { IProxyChatServerService } from '../../server/common/proxyChatServer';
+import { ProxyChatServerService } from '../../server/node/proxyChatServerService';
 import { WorkspaceMutationManager } from '../../testing/node/setupTestsFileManager';
 import { IToolsService } from '../../tools/common/toolsService';
 import { ToolsService } from '../../tools/vscode-node/toolsService';
@@ -102,7 +105,6 @@ import { LanguageContextServiceImpl } from '../../typescriptContext/vscode-node/
 import { IWorkspaceListenerService } from '../../workspaceRecorder/common/workspaceListenerService';
 import { WorkspacListenerService } from '../../workspaceRecorder/vscode-node/workspaceListenerService';
 import { registerServices as registerCommonServices } from '../vscode/services';
-import { NativeEnvServiceImpl } from '../../../platform/env/vscode-node/nativeEnvServiceImpl';
 
 // ###########################################################################################
 // ###                                                                                     ###
@@ -195,6 +197,8 @@ export function registerServices(builder: IInstantiationServiceBuilder, extensio
 	builder.define(IWorkspaceListenerService, new SyncDescriptor(WorkspacListenerService));
 	builder.define(ICodeSearchAuthenticationService, new SyncDescriptor(VsCodeCodeSearchAuthenticationService));
 	builder.define(ITodoListContextProvider, new SyncDescriptor(TodoListContextProvider));
+	// Proxy chat server service (auto-starts itself asynchronously)
+	builder.define(IProxyChatServerService, new SyncDescriptor(ProxyChatServerService));
 }
 
 function setupMSFTExperimentationService(builder: IInstantiationServiceBuilder, extensionContext: ExtensionContext) {

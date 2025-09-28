@@ -14,6 +14,7 @@ import { IInstantiationServiceBuilder, InstantiationServiceBuilder } from '../..
 import { IInstantiationService } from '../../../util/vs/platform/instantiation/common/instantiation';
 import { CopilotExtensionApi } from '../../api/vscode/extensionApi';
 import { ContributionCollection, IExtensionContributionFactory } from '../../common/contributions';
+import { IProxyChatServerService } from '../../server/common/proxyChatServer';
 
 // ##################################################################################
 // ###                                                                            ###
@@ -105,6 +106,13 @@ export function createInstantiationService(configuration: IExtensionActivationCo
 
 		// force create heatmap service
 		accessor.get(IHeatmapService);
+
+		// Eagerly instantiate proxy chat server service so its worker & logs start immediately.
+		try {
+			accessor.get(IProxyChatServerService);
+		} catch (err) {
+			// In non-node runtimes (web), service might not be registered; ignore.
+		}
 	});
 
 	return instantiationService;
