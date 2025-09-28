@@ -1,7 +1,7 @@
 Add-Type -AssemblyName System.Net.Http
 
 $uri  = 'http://127.0.0.1:3899/chat'
-$body = '{"prompt":"give me 3 types of A* algo implementations"}'
+$body = '{"prompt":"Say Hello word"}'
 
 $req = [System.Net.Http.HttpRequestMessage]::new([System.Net.Http.HttpMethod]::Post, $uri)
 $req.Headers.Accept.ParseAdd('text/event-stream')
