@@ -1,0 +1,78 @@
+.status-bar {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  padding: 4px 12px;
+  background: var(--vscode-sidebar-bg);
+  border-top: 1px solid var(--vscode-border);
+  font-size: 12px;
+  height: 28px;
+  flex-shrink: 0;
+}
+
+.status-section {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.status-section.right {
+  margin-left: auto;
+}
+
+.status-button {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  background: transparent;
+  border: none;
+  padding: 2px 8px;
+  border-radius: 3px;
+  font-size: 12px;
+  cursor: pointer;
+  color: var(--vscode-text);
+}
+
+.status-button:hover {
+  background: var(--vscode-hover);
+}
+
+.status-icon {
+  flex-shrink: 0;
+}
+
+.status-icon.success {
+  color: var(--vscode-success);
+}
+
+.status-icon.error {
+  color: var(--vscode-error);
+}
+
+.status-icon.connecting {
+  color: var(--vscode-warning);
+  animation: pulse 1.5s ease-in-out infinite;
+}
+
+@keyframes pulse {
+  0%, 100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.5;
+  }
+}
+
+.status-label {
+  color: var(--vscode-text-secondary);
+}
+
+.status-value {
+  font-weight: 500;
+  color: var(--vscode-text);
+}
+
+.status-info {
+  color: var(--vscode-text-secondary);
+  font-size: 11px;
+}

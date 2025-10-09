@@ -4,6 +4,13 @@
 node_modules/
 dist/
 
+# Web client
+copilot-chat-client/node_modules/
+copilot-chat-client/dist/
+copilot-chat-client/.vite/
+copilot-chat-client/.env
+copilot-chat-client/.env.local
+
 # created by simulation
 .simulation
 
