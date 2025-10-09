@@ -118,6 +118,8 @@ export class ChatMLFetcherImpl extends AbstractChatMLFetcher {
 			postOptions
 		});
 
+		// Log LLM request content
+		this._logService.info(`[ChatML Request] requestId=${ourRequestId}, model=${chatEndpoint.model}, messages=${JSON.stringify(opts.messages)}, requestBody=${JSON.stringify(requestBody)}, postOptions=${JSON.stringify(postOptions)}`);
 
 		const baseTelemetry = TelemetryData.createAndMarkAsIssued({
 			...telemetryProperties,
@@ -175,6 +177,8 @@ export class ChatMLFetcherImpl extends AbstractChatMLFetcher {
 			pendingLoggedChatRequest?.markTimeToFirstToken(timeToFirstToken);
 			switch (response.type) {
 				case FetchResponseKind.Success: {
+					// Log LLM response raw data
+					this._logService.info(`[ChatML Response] requestId=${ourRequestId}, model=${chatEndpoint.model}, response=${JSON.stringify(response)}, timeToFirstToken=${timeToFirstToken}`);
 					const result = await this.processSuccessfulResponse(response, messages, requestBody, ourRequestId, maxResponseTokens, tokenCount, timeToFirstToken, streamRecorder, baseTelemetry, chatEndpoint, userInitiatedRequest);
 
 					// Handle FilteredRetry case with augmented messages
@@ -230,6 +234,8 @@ export class ChatMLFetcherImpl extends AbstractChatMLFetcher {
 					return result;
 				}
 				case FetchResponseKind.Canceled:
+					// Log LLM canceled response
+					this._logService.info(`[ChatML Canceled Response] requestId=${ourRequestId}, model=${chatEndpoint.model}, response=${JSON.stringify(response)}`);
 					this._sendCancellationTelemetry({
 						source: telemetryProperties.messageSource ?? 'unknown',
 						requestId: ourRequestId,
@@ -249,6 +255,8 @@ export class ChatMLFetcherImpl extends AbstractChatMLFetcher {
 					pendingLoggedChatRequest?.resolveWithCancelation();
 					return this.processCanceledResponse(response, ourRequestId);
 				case FetchResponseKind.Failed: {
+					// Log LLM failed response
+					this._logService.info(`[ChatML Failed Response] requestId=${ourRequestId}, model=${chatEndpoint.model}, response=${JSON.stringify(response)}`);
 					const processed = this.processFailedResponse(response, ourRequestId);
 					this._sendResponseErrorTelemetry(processed, telemetryProperties, ourRequestId, chatEndpoint, requestBody, tokenCount, maxResponseTokens, timeToFirstToken, this.filterImageMessages(messages));
 					pendingLoggedChatRequest?.resolve(processed);
@@ -257,6 +265,8 @@ export class ChatMLFetcherImpl extends AbstractChatMLFetcher {
 			}
 		} catch (err: unknown) {
 			const timeToError = Date.now() - baseTelemetry.issuedTime;
+			// Log LLM error
+			this._logService.info(`[ChatML Error] requestId=${ourRequestId}, model=${chatEndpoint.model}, error=${JSON.stringify(err)}`);
 			const processed = this.processError(err, ourRequestId);
 			if (processed.type === ChatFetchResponseType.Canceled) {
 				this._sendCancellationTelemetry({
