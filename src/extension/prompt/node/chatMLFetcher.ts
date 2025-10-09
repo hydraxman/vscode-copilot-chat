@@ -118,6 +118,45 @@ export class ChatMLFetcherImpl extends AbstractChatMLFetcher {
 			postOptions
 		});
 
+		// Lightweight, developer-oriented logging of model request (sanitized)
+		try {
+			const logModelIO = true; // Set env var to enable verbose IO logs
+			if (logModelIO) {
+				// Produce a compact preview of the last user message and any system/instruction messages
+				const previewMessages = messages.slice(-6).map(m => {
+					// Text parts may be an array (tool calls, images etc). We only log raw text snippets.
+					let text = '';
+					if (Array.isArray(m.content)) {
+						text = m.content.filter(c => 'text' in c).map(c => (c as any).text).join('\n');
+					} else if (typeof m.content === 'string') {
+						text = m.content;
+					}
+					text = text.replace(/\s+/g, ' ').slice(0, 500);
+					return { role: m.role, text };
+				});
+				const toolCount = Array.isArray(requestBody.tools) ? requestBody.tools.length : 0;
+				this._logService.info('[AI][request] ' + JSON.stringify({
+					requestId: ourRequestId,
+					model: chatEndpoint.model,
+					family: chatEndpoint.family,
+					apiType: chatEndpoint.apiType,
+					location: ChatLocation[location] ?? location,
+					messages: messages.length,
+					preview: previewMessages,
+					tools: toolCount,
+					options: {
+						max_tokens: (requestBody as any).max_tokens ?? (requestBody as any).max_output_tokens ?? (requestBody as any).max_completion_tokens,
+						temperature: (requestBody as any).temperature,
+						stream: (requestBody as any).stream,
+						reasoning: (requestBody as any).reasoning?.effort
+					}
+				}));
+			}
+		} catch (e) {
+			// Never let logging break the request path
+			this._logService.info('[AI][request][logError] ' + (e instanceof Error ? e.message : String(e)));
+		}
+
 
 		const baseTelemetry = TelemetryData.createAndMarkAsIssued({
 			...telemetryProperties,
@@ -419,6 +458,21 @@ export class ChatMLFetcherImpl extends AbstractChatMLFetcher {
 		const completions: ChatCompletion[] = [];
 
 		for await (const chatCompletion of response.chatCompletions) {
+			// Per-completion logging (preview only) if enabled
+			if (true) {
+				try {
+					const text = getTextPart(chatCompletion.message.content).replace(/\s+/g, ' ').slice(0, 800);
+					this._logService.info('[AI][responseChunk] ' + JSON.stringify({
+						requestId,
+						choice: chatCompletion.choiceIndex,
+						finish: chatCompletion.finishReason,
+						filter: chatCompletion.filterReason,
+						preview: text
+					}));
+				} catch (e) {
+					this._logService.info('[AI][responseChunk][logError] ' + (e instanceof Error ? e.message : String(e)));
+				}
+			}
 			/* __GDPR__
 				"response.success" : {
 					"owner": "digitarald",
