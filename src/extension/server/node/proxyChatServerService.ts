@@ -10,18 +10,20 @@ import { defaultAgentName, getChatParticipantIdFromName } from '../../../platfor
 import { IEndpointProvider } from '../../../platform/endpoint/common/endpointProvider';
 import { ILogService } from '../../../platform/log/common/logService';
 import type { IChatEndpoint } from '../../../platform/networking/common/networking';
-import { ChatResponseStreamImpl, FinalizableChatResponseStream, tryFinalizeResponseStream } from '../../../util/common/chatResponseStreamImpl';
+import { IWorkspaceService } from '../../../platform/workspace/common/workspaceService';
+import { ChatResponseStreamImpl, FinalizableChatResponseStream } from '../../../util/common/chatResponseStreamImpl';
 import { CancellationTokenSource } from '../../../util/vs/base/common/cancellation';
 import { CancellationError } from '../../../util/vs/base/common/errors';
 import { Event } from '../../../util/vs/base/common/event';
 import { Disposable } from '../../../util/vs/base/common/lifecycle';
 import * as path from '../../../util/vs/base/common/path';
+import { URI } from '../../../util/vs/base/common/uri';
 import { generateUuid } from '../../../util/vs/base/common/uuid';
 import { IInstantiationService } from '../../../util/vs/platform/instantiation/common/instantiation';
 import { ChatPrepareToolInvocationPart, ChatRequestTurn2, ChatResponseAnchorPart, ChatResponseCodeCitationPart, ChatResponseCodeblockUriPart, ChatResponseCommandButtonPart, ChatResponseFileTreePart, ChatResponseMarkdownPart, ChatResponseMarkdownWithVulnerabilitiesPart, ChatResponseNotebookEditPart, ChatResponseProgressPart, ChatResponseProgressPart2, ChatResponseReferencePart, ChatResponseTextEditPart, ChatResponseThinkingProgressPart, ChatResponseTurn2, ChatResponseWarningPart, ChatToolInvocationPart, MarkdownString, ChatLocation as VSChatLocation } from '../../../vscodeTypes';
-import { ChatParticipantRequestHandler } from '../../prompt/node/chatParticipantRequestHandler';
+import { ChatParticipantRequestHandler, IChatAgentArgs } from '../../prompt/node/chatParticipantRequestHandler';
 import { IProxyChatServerService } from '../common/proxyChatServer';
-import { ProxyHostToServerChunkMessage, ProxyHostToServerMessage, ProxyServerLifecycleState, ProxyServerToHostChatRequestMessage, ProxyServerToHostMessage, SerializedChatPart } from '../common/proxyProtocol';
+import { ProxyHostToServerChunkMessage, ProxyHostToServerMessage, ProxyServerLifecycleState, ProxyServerToHostChatRequestMessage, ProxyServerToHostMessage, SerializedChatPart, WorkspaceFileNode, WorkspaceStructure } from '../common/proxyProtocol';
 
 // Worker JS is emitted beside this file after build. Keep .js extension.
 const workerPath = path.join(__dirname, 'proxyChatServerWorker.js');
@@ -171,6 +173,7 @@ export class ProxyChatServerService extends Disposable implements IProxyChatServ
 		@IInstantiationService private readonly instantiationService: IInstantiationService,
 		@ILogService private readonly logService: ILogService,
 		@IEndpointProvider private readonly endpointProvider: IEndpointProvider,
+		@IWorkspaceService private readonly workspaceService: IWorkspaceService,
 	) {
 		super();
 		this.tryInitOutputChannel();
@@ -252,6 +255,42 @@ export class ProxyChatServerService extends Disposable implements IProxyChatServ
 				if (this.debugVerbose) { const m = `[ProxyChatServer] cancellation requested requestId=${message.requestId}`; this.logService.info(m); this.oc(`[debug] ${m}`); }
 				this.cancelRequest(message.requestId);
 				break;
+			case 'getWorkspaceStructure':
+				this.handleGetWorkspaceStructure(message).catch(err => {
+					const errorMsg = err instanceof Error ? err.message : String(err);
+					this.postMessageToWorker({ type: 'apiError', requestId: message.requestId, message: errorMsg });
+				});
+				break;
+			case 'getFileContent':
+				this.handleGetFileContent(message).catch(err => {
+					const errorMsg = err instanceof Error ? err.message : String(err);
+					this.postMessageToWorker({ type: 'apiError', requestId: message.requestId, message: errorMsg });
+				});
+				break;
+			case 'getActiveFiles':
+				this.handleGetActiveFiles(message).catch(err => {
+					const errorMsg = err instanceof Error ? err.message : String(err);
+					this.postMessageToWorker({ type: 'apiError', requestId: message.requestId, message: errorMsg });
+				});
+				break;
+			case 'acceptEdit':
+				this.handleAcceptEdit(message).catch(err => {
+					const errorMsg = err instanceof Error ? err.message : String(err);
+					this.postMessageToWorker({ type: 'apiError', requestId: message.requestId, message: errorMsg });
+				});
+				break;
+			case 'declineEdit':
+				this.handleDeclineEdit(message).catch(err => {
+					const errorMsg = err instanceof Error ? err.message : String(err);
+					this.postMessageToWorker({ type: 'apiError', requestId: message.requestId, message: errorMsg });
+				});
+				break;
+			case 'getModelInfo':
+				this.handleGetModelInfo(message).catch(err => {
+					const errorMsg = err instanceof Error ? err.message : String(err);
+					this.postMessageToWorker({ type: 'apiError', requestId: message.requestId, message: errorMsg });
+				});
+				break;
 			case 'shutdown':
 				this.logService.info('[ProxyChatServer] shutdown message received from worker');
 				this.oc('[info] shutdown message received from worker');
@@ -279,9 +318,11 @@ export class ProxyChatServerService extends Disposable implements IProxyChatServ
 
 		const startTs = Date.now();
 		const promptPreview = chatRequest.prompt.length > 120 ? chatRequest.prompt.slice(0, 117) + '...' : chatRequest.prompt;
-		const handleLine = `[ProxyChatServer] handling request requestId=${message.requestId} conversationId=${conversationId} attempt=${attempt} prompt="${promptPreview}"`;
+		const handleLine = `[ProxyChatServer] triggering UI chat requestId=${message.requestId} conversationId=${conversationId} attempt=${attempt} prompt="${promptPreview}"`;
 		this.logService.info(handleLine);
 		this.oc(`[info] ${handleLine}`);
+
+		// Create stream for web client
 		const stream = new ProxyChatResponseStream(chunk => {
 			if (this.debugVerbose && (chunk.kind === 'progress' || chunk.kind === 'tool')) {
 				const sk = `[ProxyChatServer] -> stream kind=${chunk.kind}` + (chunk.kind === 'progress' ? ` message="${chunk.message}"` : '');
@@ -291,6 +332,7 @@ export class ProxyChatServerService extends Disposable implements IProxyChatServ
 			this.postMessageToWorker({ type: 'responseChunk', requestId: message.requestId, chunk } satisfies ProxyHostToServerChunkMessage);
 		});
 
+		const cancellation = new CancellationTokenSource();
 		const requestTurn = new ChatRequestTurn2(
 			chatRequest.prompt,
 			chatRequest.command,
@@ -300,42 +342,67 @@ export class ProxyChatServerService extends Disposable implements IProxyChatServ
 			undefined
 		) as unknown as vscode.ChatRequestTurn;
 
-		const cancellation = new CancellationTokenSource();
 		const pending: PendingRequestState = { requestId: message.requestId, conversationId, cancellation, stream, requestTurn };
 		this.pendingRequests.set(message.requestId, pending);
 
+		// Process in background using ChatParticipantRequestHandler
 		try {
+			// Try to get VSCodeAPI if available
+			if (!VSCodeAPI) {
+				try { VSCodeAPI = require('vscode'); } catch { /* ignore */ }
+			}
+			const activeEditor = VSCodeAPI?.window?.activeTextEditor;
+
+			// Add context hint if we have an active editor
+			let enhancedPrompt = chatRequest.prompt;
+			if (activeEditor) {
+				const fileName = activeEditor.document.fileName;
+				const selection = activeEditor.selection;
+				const hasSelection = !selection.isEmpty;
+
+				const contextHint = hasSelection
+					? `\n\n[Context: User is viewing ${fileName}, lines ${selection.start.line + 1}-${selection.end.line + 1} selected]`
+					: `\n\n[Context: User is viewing ${fileName}, cursor at line ${selection.active.line + 1}]`;
+
+				enhancedPrompt = chatRequest.prompt + contextHint;
+				this.oc(`[debug] Added editor context from ${fileName}`);
+			}
+
+			// Create handler and process request in background
+			const chatAgentArgs: IChatAgentArgs = {
+				agentName: this.agentName,
+				agentId: this.agentId,
+				intentId: ''
+			};
+
 			const handler = this.instantiationService.createInstance(
 				ChatParticipantRequestHandler,
 				conversation.history,
-				chatRequest,
+				{ ...chatRequest, prompt: enhancedPrompt },
 				stream,
 				cancellation.token,
-				{ agentName: this.agentName, agentId: this.agentId, intentId: undefined },
+				chatAgentArgs,
 				Event.None
 			);
 
-			const chatResult = await handler.getResult();
-			await tryFinalizeResponseStream(stream);
+			const result = await handler.getResult();
 
+			// Success - add to conversation history
 			conversation.history.push(requestTurn);
-			const responseTurn = new ChatResponseTurn2(stream.contentParts, chatResult, this.agentId) as unknown as vscode.ChatResponseTurn;
+			const responseTurn = new ChatResponseTurn2(stream.contentParts, {}, this.agentId) as unknown as vscode.ChatResponseTurn;
 			conversation.history.push(responseTurn);
 
 			const duration = Date.now() - startTs;
 			const completeLine = `[ProxyChatServer] request complete requestId=${message.requestId} durationMs=${duration}`;
 			this.logService.info(completeLine);
 			this.oc(`[info] ${completeLine}`);
-			this.postMessageToWorker({ type: 'responseComplete', requestId: message.requestId, conversationId, metadata: sanitizeMetadata(chatResult?.metadata) });
+			this.postMessageToWorker({ type: 'responseComplete', requestId: message.requestId, conversationId, metadata: result?.metadata as any || {} });
 		} catch (err) {
 			const em = err instanceof Error ? err.message : String(err);
 			this.logService.error(err instanceof Error ? err : new Error(String(err)), '[ProxyChatServer] Request failed');
 			this.oc(`[error] request failed requestId=${message.requestId} error=${em}`);
 			this.postMessageToWorker({ type: 'responseError', requestId: message.requestId, status: err instanceof CancellationError ? 499 : 500, message: err instanceof Error ? err.message : String(err) });
 		} finally {
-			if (!this.pendingRequests.has(message.requestId)) {
-				// already removed by cancellation path
-			}
 			this.pendingRequests.delete(message.requestId);
 		}
 	}
@@ -347,6 +414,190 @@ export class ProxyChatServerService extends Disposable implements IProxyChatServ
 		this.logService.info(cancelLine);
 		this.oc(`[info] ${cancelLine}`);
 		pending.cancellation.cancel();
+	}
+
+	private async handleGetWorkspaceStructure(message: { type: 'getWorkspaceStructure'; requestId: string }): Promise<void> {
+		this.logService.info(`[ProxyChatServer] getting workspace structure requestId=${message.requestId}`);
+
+		const workspaceFolders = this.workspaceService.getWorkspaceFolders();
+		const structure: WorkspaceStructure = {
+			workspaceFolders: []
+		};
+
+		for (const folderUri of workspaceFolders) {
+			const folderName = this.workspaceService.getWorkspaceFolderName(folderUri);
+			const tree = await this.buildFileTree(folderUri);
+			structure.workspaceFolders.push({
+				name: folderName,
+				path: folderUri.fsPath,
+				tree
+			});
+		}
+
+		this.postMessageToWorker({ type: 'workspaceStructure', requestId: message.requestId, structure });
+	}
+
+	private async buildFileTree(folderUri: URI, depth: number = 0, maxDepth: number = 5): Promise<WorkspaceFileNode[]> {
+		if (depth > maxDepth) { return []; }
+
+		try {
+			const entries = await this.workspaceService.fs.readDirectory(folderUri);
+			const nodes: WorkspaceFileNode[] = [];
+
+			for (const [name, fileType] of entries) {
+				// Skip hidden files and common ignore patterns
+				if (name.startsWith('.') || name === 'node_modules' || name === '__pycache__' || name === 'dist' || name === 'build') {
+					continue;
+				}
+
+				const childUri = URI.joinPath(folderUri, name);
+				const relativePath = this.workspaceService.asRelativePath(childUri, false);
+
+				if (fileType === 2 /* FileType.Directory */) {
+					const children = await this.buildFileTree(childUri, depth + 1, maxDepth);
+					nodes.push({
+						name,
+						path: relativePath,
+						type: 'directory',
+						children
+					});
+				} else if (fileType === 1 /* FileType.File */) {
+					nodes.push({
+						name,
+						path: relativePath,
+						type: 'file'
+					});
+				}
+			}
+
+			return nodes;
+		} catch (err) {
+			this.logService.error(err instanceof Error ? err : new Error(String(err)), `[ProxyChatServer] Failed to read directory ${folderUri.fsPath}`);
+			return [];
+		}
+	}
+
+	private async handleGetFileContent(message: { type: 'getFileContent'; requestId: string; filePath: string }): Promise<void> {
+		this.logService.info(`[ProxyChatServer] getting file content requestId=${message.requestId} path=${message.filePath}`);
+
+		try {
+			// Try to find the file in workspace folders
+			const workspaceFolders = this.workspaceService.getWorkspaceFolders();
+			let fileUri: URI | undefined;
+
+			for (const folder of workspaceFolders) {
+				const candidateUri = URI.joinPath(folder, message.filePath);
+				try {
+					const stat = await this.workspaceService.fs.stat(candidateUri);
+					if (stat.type === 1 /* FileType.File */) {
+						fileUri = candidateUri;
+						break;
+					}
+				} catch {
+					// File not found in this folder, try next
+					continue;
+				}
+			}
+
+			if (!fileUri) {
+				throw new Error(`File not found: ${message.filePath}`);
+			}
+
+			const bytes = await this.workspaceService.fs.readFile(fileUri);
+			const content = Buffer.from(bytes).toString('utf8');
+
+			this.postMessageToWorker({
+				type: 'fileContent',
+				requestId: message.requestId,
+				content,
+				encoding: 'utf8'
+			});
+		} catch (err) {
+			throw new Error(`Failed to read file: ${err instanceof Error ? err.message : String(err)}`);
+		}
+	}
+
+	private async handleGetActiveFiles(message: { type: 'getActiveFiles'; requestId: string }): Promise<void> {
+		this.logService.info(`[ProxyChatServer] getting active files requestId=${message.requestId}`);
+
+		try {
+			// Get all currently open text documents
+			const activeFiles = this.workspaceService.textDocuments
+				.filter(doc => doc.uri.scheme === 'file' || doc.uri.scheme === 'vscode-userdata')
+				.map(doc => this.workspaceService.asRelativePath(doc.uri, true));
+
+			this.postMessageToWorker({
+				type: 'activeFiles',
+				requestId: message.requestId,
+				files: activeFiles
+			});
+		} catch (err) {
+			throw new Error(`Failed to get active files: ${err instanceof Error ? err.message : String(err)}`);
+		}
+	}
+
+	private async handleAcceptEdit(message: { type: 'acceptEdit'; requestId: string; editId: string }): Promise<void> {
+		this.logService.info(`[ProxyChatServer] accepting edit requestId=${message.requestId} editId=${message.editId}`);
+
+		try {
+			// Note: This is a placeholder. In a real implementation, you would need to:
+			// 1. Track pending edits from chat responses (tool calls, code blocks, etc.)
+			// 2. Apply the edit using workspaceService.applyEdit()
+			// 3. Maintain a map of editId -> WorkspaceEdit
+
+			// For now, return a message indicating the feature needs implementation
+			this.postMessageToWorker({
+				type: 'editResponse',
+				requestId: message.requestId,
+				success: false,
+				message: 'Edit tracking not yet implemented. Edits are auto-applied in responses.'
+			});
+		} catch (err) {
+			throw new Error(`Failed to accept edit: ${err instanceof Error ? err.message : String(err)}`);
+		}
+	}
+
+	private async handleDeclineEdit(message: { type: 'declineEdit'; requestId: string; editId: string }): Promise<void> {
+		this.logService.info(`[ProxyChatServer] declining edit requestId=${message.requestId} editId=${message.editId}`);
+
+		try {
+			// Note: This is a placeholder. In a real implementation, you would need to:
+			// 1. Track pending edits from chat responses
+			// 2. Remove the edit from the pending queue
+			// 3. Optionally revert if already applied
+
+			this.postMessageToWorker({
+				type: 'editResponse',
+				requestId: message.requestId,
+				success: false,
+				message: 'Edit tracking not yet implemented. Edits are auto-applied in responses.'
+			});
+		} catch (err) {
+			throw new Error(`Failed to decline edit: ${err instanceof Error ? err.message : String(err)}`);
+		}
+	}
+
+	private async handleGetModelInfo(message: { type: 'getModelInfo'; requestId: string }): Promise<void> {
+		this.logService.info(`[ProxyChatServer] getting model info requestId=${message.requestId}`);
+
+		try {
+			const modelId = this.defaultModel ? (this.defaultModel as any).id ?? 'unknown' : 'unknown';
+			const modelName = this.defaultModel ? (this.defaultModel as any).name ?? modelId : 'Unknown';
+
+			// Note: The proxy server currently only supports 'ask' mode (panel chat)
+			// Edit and Agent modes would require different request handling
+			const mode: 'ask' | 'edit' | 'agent' = 'ask';
+
+			this.postMessageToWorker({
+				type: 'modelInfo',
+				requestId: message.requestId,
+				modelId,
+				modelName,
+				mode
+			});
+		} catch (err) {
+			throw new Error(`Failed to get model info: ${err instanceof Error ? err.message : String(err)}`);
+		}
 	}
 
 	private postMessageToWorker(message: ProxyHostToServerMessage) { if (this.worker) { this.worker.postMessage(message); } }
@@ -420,10 +671,5 @@ async function resolveProxyDefaultModel(endpointProvider: IEndpointProvider, log
 		}
 	}
 	throw new Error('Unable to resolve a chat model for proxy server');
-}
-
-function sanitizeMetadata(metadata: unknown): Record<string, unknown> | undefined {
-	if (!metadata) { return undefined; }
-	try { return JSON.parse(JSON.stringify(metadata)) as Record<string, unknown>; } catch { return undefined; }
 }
 

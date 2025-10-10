@@ -35,6 +35,9 @@ function endSSE(res) {
 	try { res.end(); } catch { /* noop */ }
 }
 
+/** @type {Map<string, {res: import('http').ServerResponse, resolve: (data: any) => void, reject: (err: any) => void}>} */
+const pendingApiCalls = new Map();
+
 parentPort.on('message', msg => {
 	switch (msg.type) {
 		case 'responseChunk': {
@@ -62,6 +65,26 @@ parentPort.on('message', msg => {
 			writeSSE(entry.res, 'error', { status: msg.status, message: msg.message });
 			endSSE(entry.res);
 			active.delete(msg.requestId);
+			break;
+		}
+		case 'workspaceStructure':
+		case 'fileContent':
+		case 'activeFiles':
+		case 'editResponse':
+		case 'modelInfo': {
+			const pending = pendingApiCalls.get(msg.requestId);
+			if (pending) {
+				pending.resolve(msg);
+				pendingApiCalls.delete(msg.requestId);
+			}
+			break;
+		}
+		case 'apiError': {
+			const pending = pendingApiCalls.get(msg.requestId);
+			if (pending) {
+				pending.reject(new Error(msg.message));
+				pendingApiCalls.delete(msg.requestId);
+			}
 			break;
 		}
 		case 'shutdown': {
@@ -137,6 +160,167 @@ const server = http.createServer((req, res) => {
 	if (req.method === 'GET' && req.url === '/health') {
 		res.writeHead(200, { 'Content-Type': 'application/json' });
 		res.end(JSON.stringify({ status: 'ok' }));
+		return;
+	}
+
+	// Workspace structure API
+	if (req.method === 'GET' && req.url === '/api/workspace/structure') {
+		const requestId = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
+		log(`workspace structure request requestId=${requestId}`);
+
+		const promise = new Promise((resolve, reject) => {
+			pendingApiCalls.set(requestId, { res, resolve, reject });
+			sendToHost({ type: 'getWorkspaceStructure', requestId });
+		});
+
+		promise.then(msg => {
+			res.writeHead(200, { 'Content-Type': 'application/json' });
+			res.end(JSON.stringify(msg.structure));
+		}).catch(err => {
+			res.writeHead(500, { 'Content-Type': 'application/json' });
+			res.end(JSON.stringify({ error: err.message }));
+		});
+		return;
+	}
+
+	// File content API
+	if (req.method === 'GET' && req.url?.startsWith('/api/workspace/file?path=')) {
+		const filePath = decodeURIComponent(req.url.split('?path=')[1]);
+		const requestId = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
+		log(`file content request requestId=${requestId} path=${filePath}`);
+
+		const promise = new Promise((resolve, reject) => {
+			pendingApiCalls.set(requestId, { res, resolve, reject });
+			sendToHost({ type: 'getFileContent', requestId, filePath });
+		});
+
+		promise.then(msg => {
+			res.writeHead(200, { 'Content-Type': 'text/plain; charset=utf-8' });
+			res.end(msg.content);
+		}).catch(err => {
+			res.writeHead(404, { 'Content-Type': 'application/json' });
+			res.end(JSON.stringify({ error: err.message }));
+		});
+		return;
+	}
+
+	// Active files API
+	if (req.method === 'GET' && req.url === '/api/workspace/active-files') {
+		const requestId = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
+		log(`active files request requestId=${requestId}`);
+
+		const promise = new Promise((resolve, reject) => {
+			pendingApiCalls.set(requestId, { res, resolve, reject });
+			sendToHost({ type: 'getActiveFiles', requestId });
+		});
+
+		promise.then(msg => {
+			res.writeHead(200, { 'Content-Type': 'application/json' });
+			res.end(JSON.stringify({ files: msg.files }));
+		}).catch(err => {
+			res.writeHead(500, { 'Content-Type': 'application/json' });
+			res.end(JSON.stringify({ error: err.message }));
+		});
+		return;
+	}
+
+	// Accept edit API
+	if (req.method === 'POST' && req.url === '/api/edit/accept') {
+		req.setEncoding('utf8');
+		let body = '';
+		req.on('data', chunk => { body += chunk; });
+		req.on('end', () => {
+			let payload;
+			try { payload = JSON.parse(body || '{}'); } catch (e) {
+				res.writeHead(400, { 'Content-Type': 'application/json' });
+				res.end(JSON.stringify({ error: 'Invalid JSON' }));
+				return;
+			}
+
+			if (!payload.editId) {
+				res.writeHead(400, { 'Content-Type': 'application/json' });
+				res.end(JSON.stringify({ error: 'Missing editId' }));
+				return;
+			}
+
+			const requestId = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
+			log(`accept edit request requestId=${requestId} editId=${payload.editId}`);
+
+			const promise = new Promise((resolve, reject) => {
+				pendingApiCalls.set(requestId, { res, resolve, reject });
+				sendToHost({ type: 'acceptEdit', requestId, editId: payload.editId });
+			});
+
+			promise.then(msg => {
+				res.writeHead(200, { 'Content-Type': 'application/json' });
+				res.end(JSON.stringify({ success: msg.success, message: msg.message }));
+			}).catch(err => {
+				res.writeHead(500, { 'Content-Type': 'application/json' });
+				res.end(JSON.stringify({ error: err.message }));
+			});
+		});
+		return;
+	}
+
+	// Decline edit API
+	if (req.method === 'POST' && req.url === '/api/edit/decline') {
+		req.setEncoding('utf8');
+		let body = '';
+		req.on('data', chunk => { body += chunk; });
+		req.on('end', () => {
+			let payload;
+			try { payload = JSON.parse(body || '{}'); } catch (e) {
+				res.writeHead(400, { 'Content-Type': 'application/json' });
+				res.end(JSON.stringify({ error: 'Invalid JSON' }));
+				return;
+			}
+
+			if (!payload.editId) {
+				res.writeHead(400, { 'Content-Type': 'application/json' });
+				res.end(JSON.stringify({ error: 'Missing editId' }));
+				return;
+			}
+
+			const requestId = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
+			log(`decline edit request requestId=${requestId} editId=${payload.editId}`);
+
+			const promise = new Promise((resolve, reject) => {
+				pendingApiCalls.set(requestId, { res, resolve, reject });
+				sendToHost({ type: 'declineEdit', requestId, editId: payload.editId });
+			});
+
+			promise.then(msg => {
+				res.writeHead(200, { 'Content-Type': 'application/json' });
+				res.end(JSON.stringify({ success: msg.success, message: msg.message }));
+			}).catch(err => {
+				res.writeHead(500, { 'Content-Type': 'application/json' });
+				res.end(JSON.stringify({ error: err.message }));
+			});
+		});
+		return;
+	}
+
+	// Model info API
+	if (req.method === 'GET' && req.url === '/api/model/info') {
+		const requestId = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
+		log(`model info request requestId=${requestId}`);
+
+		const promise = new Promise((resolve, reject) => {
+			pendingApiCalls.set(requestId, { res, resolve, reject });
+			sendToHost({ type: 'getModelInfo', requestId });
+		});
+
+		promise.then(msg => {
+			res.writeHead(200, { 'Content-Type': 'application/json' });
+			res.end(JSON.stringify({
+				modelId: msg.modelId,
+				modelName: msg.modelName,
+				mode: msg.mode
+			}));
+		}).catch(err => {
+			res.writeHead(500, { 'Content-Type': 'application/json' });
+			res.end(JSON.stringify({ error: err.message }));
+		});
 		return;
 	}
 

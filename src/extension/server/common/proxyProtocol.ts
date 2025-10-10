@@ -28,7 +28,49 @@ export interface ProxyServerToHostShutdownMessage {
 	readonly type: 'shutdown';
 }
 
-export type ProxyServerToHostMessage = ProxyServerToHostChatRequestMessage | ProxyServerToHostCancelMessage | ProxyServerToHostShutdownMessage;
+export interface ProxyServerToHostGetWorkspaceStructureMessage {
+	readonly type: 'getWorkspaceStructure';
+	readonly requestId: string;
+}
+
+export interface ProxyServerToHostGetFileContentMessage {
+	readonly type: 'getFileContent';
+	readonly requestId: string;
+	readonly filePath: string;
+}
+
+export interface ProxyServerToHostGetActiveFilesMessage {
+	readonly type: 'getActiveFiles';
+	readonly requestId: string;
+}
+
+export interface ProxyServerToHostAcceptEditMessage {
+	readonly type: 'acceptEdit';
+	readonly requestId: string;
+	readonly editId: string;
+}
+
+export interface ProxyServerToHostDeclineEditMessage {
+	readonly type: 'declineEdit';
+	readonly requestId: string;
+	readonly editId: string;
+}
+
+export interface ProxyServerToHostGetModelInfoMessage {
+	readonly type: 'getModelInfo';
+	readonly requestId: string;
+}
+
+export type ProxyServerToHostMessage =
+	| ProxyServerToHostChatRequestMessage
+	| ProxyServerToHostCancelMessage
+	| ProxyServerToHostShutdownMessage
+	| ProxyServerToHostGetWorkspaceStructureMessage
+	| ProxyServerToHostGetFileContentMessage
+	| ProxyServerToHostGetActiveFilesMessage
+	| ProxyServerToHostAcceptEditMessage
+	| ProxyServerToHostDeclineEditMessage
+	| ProxyServerToHostGetModelInfoMessage;
 
 export type SerializedChatPart =
 	| { readonly kind: 'progress'; readonly message: string }
@@ -65,11 +107,72 @@ export interface ProxyHostToServerReadyMessage {
 	readonly port: number;
 }
 
+export interface ProxyHostToServerWorkspaceStructureMessage {
+	readonly type: 'workspaceStructure';
+	readonly requestId: string;
+	readonly structure: WorkspaceStructure;
+}
+
+export interface ProxyHostToServerFileContentMessage {
+	readonly type: 'fileContent';
+	readonly requestId: string;
+	readonly content: string;
+	readonly encoding?: string;
+}
+
+export interface ProxyHostToServerActiveFilesMessage {
+	readonly type: 'activeFiles';
+	readonly requestId: string;
+	readonly files: string[];
+}
+
+export interface ProxyHostToServerEditResponseMessage {
+	readonly type: 'editResponse';
+	readonly requestId: string;
+	readonly success: boolean;
+	readonly message?: string;
+}
+
+export interface ProxyHostToServerModelInfoMessage {
+	readonly type: 'modelInfo';
+	readonly requestId: string;
+	readonly modelId: string;
+	readonly modelName: string;
+	readonly mode: 'ask' | 'edit' | 'agent';
+}
+
+export interface ProxyHostToServerApiErrorMessage {
+	readonly type: 'apiError';
+	readonly requestId: string;
+	readonly message: string;
+}
+
 export type ProxyHostToServerMessage =
 	| ProxyHostToServerChunkMessage
 	| ProxyHostToServerCompleteMessage
 	| ProxyHostToServerErrorMessage
-	| ProxyHostToServerReadyMessage;
+	| ProxyHostToServerReadyMessage
+	| ProxyHostToServerWorkspaceStructureMessage
+	| ProxyHostToServerFileContentMessage
+	| ProxyHostToServerActiveFilesMessage
+	| ProxyHostToServerEditResponseMessage
+	| ProxyHostToServerModelInfoMessage
+	| ProxyHostToServerApiErrorMessage;
+
+export interface WorkspaceFileNode {
+	readonly name: string;
+	readonly path: string;
+	readonly type: 'file' | 'directory';
+	readonly children?: WorkspaceFileNode[];
+}
+
+export interface WorkspaceStructure {
+	readonly workspaceFolders: Array<{
+		readonly name: string;
+		readonly path: string;
+		readonly tree: WorkspaceFileNode[];
+	}>;
+}
 
 export const enum ProxyServerLifecycleState {
 	Starting = 'starting',
