@@ -209,7 +209,7 @@ export class ProxyChatServerService extends Disposable implements IProxyChatServ
 			throw err;
 		}
 
-		const requestedPort = Number(process.env.COPILOT_CHAT_PROXY_PORT ?? 3899);
+		const requestedPort = Number(process.env.COPILOT_CHAT_PROXY_PORT ?? 3998);
 		this.logService.info(`[ProxyChatServer] spawning worker on port ${requestedPort}`);
 		this.oc(`[info] spawning worker on port ${requestedPort}`);
 		this.worker = new Worker(workerPath, { workerData: { port: requestedPort, debug: this.debugVerbose } });
@@ -315,6 +315,11 @@ export class ProxyChatServerService extends Disposable implements IProxyChatServ
 			message.payload.toolReferences ?? [],
 			this.defaultModel
 		);
+
+		this.echoPromptToChatUI(chatRequest.prompt).catch(err => {
+			this.logService.warn(`[ProxyChatServer] echoPromptToChatUI failed: ${err instanceof Error ? err.message : String(err)}`);
+		});
+
 
 		const startTs = Date.now();
 		const promptPreview = chatRequest.prompt.length > 120 ? chatRequest.prompt.slice(0, 117) + '...' : chatRequest.prompt;
@@ -597,6 +602,18 @@ export class ProxyChatServerService extends Disposable implements IProxyChatServ
 			});
 		} catch (err) {
 			throw new Error(`Failed to get model info: ${err instanceof Error ? err.message : String(err)}`);
+		}
+	}
+
+	private async echoPromptToChatUI(prompt: string): Promise<void> {
+		try {
+			if (!VSCodeAPI) { VSCodeAPI = require('vscode'); }
+			if (!VSCodeAPI?.commands) { return; }
+			await VSCodeAPI.commands.executeCommand('workbench.panel.chat.view.copilot.focus');
+			await VSCodeAPI.commands.executeCommand('type', { text: prompt });
+			await VSCodeAPI.commands.executeCommand('workbench.action.chat.submit');
+		} catch (err) {
+			this.logService.trace('[ProxyChatServer] echoPromptToChatUI noop');
 		}
 	}
 

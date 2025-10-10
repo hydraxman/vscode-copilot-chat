@@ -429,6 +429,21 @@ export class ChatMLFetcherImpl extends AbstractChatMLFetcher {
 		const completions: ChatCompletion[] = [];
 
 		for await (const chatCompletion of response.chatCompletions) {
+			// Per-completion logging (preview only) if enabled
+			if (true) {
+				try {
+					const text = getTextPart(chatCompletion.message.content).replace(/\s+/g, ' ').slice(0, 800);
+					this._logService.info('[AI][responseChunk] ' + JSON.stringify({
+						requestId,
+						choice: chatCompletion.choiceIndex,
+						finish: chatCompletion.finishReason,
+						filter: chatCompletion.filterReason,
+						preview: text
+					}));
+				} catch (e) {
+					this._logService.info('[AI][responseChunk][logError] ' + (e instanceof Error ? e.message : String(e)));
+				}
+			}
 			/* __GDPR__
 				"response.success" : {
 					"owner": "digitarald",
